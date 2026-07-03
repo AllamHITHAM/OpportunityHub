@@ -8,7 +8,8 @@
 - Flutter will consume these APIs later
 
 ## Authentication APIs
-- POST /api/register
+- POST /api/register/student
+- POST /api/register/organization
 - POST /api/login
 - POST /api/logout
 - GET /api/me
