@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Middleware\EnsureOrganizationIsApproved;
 use App\Http\Middleware\EnsureStudentProfileExists;
 use App\Http\Middleware\EnsureUserHasRole;
 use App\Http\Middleware\EnsureUserIsActive;
@@ -21,6 +22,7 @@ return Application::configure(basePath: dirname(__DIR__))
             'role' => EnsureUserHasRole::class,
             'active' => EnsureUserIsActive::class,
             'profile.exists' => EnsureStudentProfileExists::class,
+            'org.approved' => EnsureOrganizationIsApproved::class,
         ]);
     })
    ->withExceptions(function (Exceptions $exceptions): void {
