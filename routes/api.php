@@ -1,10 +1,12 @@
 <?php
 
 use App\Http\Controllers\Auth\AuthController;
+use App\Http\Controllers\Organization\ApplicationController as OrganizationApplicationController;
 use App\Http\Controllers\Organization\OpportunityController;
 use App\Http\Controllers\Organization\OpportunitySkillController;
 use App\Http\Controllers\Organization\OrganizationProfileController;
 use App\Http\Controllers\Public\OpportunityController as PublicOpportunityController;
+use App\Http\Controllers\Student\ApplicationController as StudentApplicationController;
 use App\Http\Controllers\Student\CVController;
 use App\Http\Controllers\Student\StudentProfileController;
 use App\Http\Controllers\Student\StudentSkillController;
@@ -37,6 +39,9 @@ Route::middleware(['auth:sanctum', 'active', 'role:student', 'profile.exists'])-
     Route::get('/student/skills', [StudentSkillController::class, 'index']);
     Route::post('/student/skills', [StudentSkillController::class, 'store']);
     Route::delete('/student/skills/{studentSkill}', [StudentSkillController::class, 'destroy']);
+
+    Route::post('/opportunities/{opportunity}/apply', [StudentApplicationController::class, 'store']);
+    Route::get('/student/applications', [StudentApplicationController::class, 'index']);
 });
 
 Route::middleware(['auth:sanctum', 'active', 'role:organization'])->group(function () {
@@ -52,4 +57,8 @@ Route::middleware(['auth:sanctum', 'active', 'role:organization'])->group(functi
     Route::get('/organization/opportunities/{opportunity}/skills', [OpportunitySkillController::class, 'index']);
     Route::post('/organization/opportunities/{opportunity}/skills', [OpportunitySkillController::class, 'store']);
     Route::delete('/organization/opportunities/{opportunity}/skills/{opportunitySkill}', [OpportunitySkillController::class, 'destroy']);
+
+    Route::get('/organization/applications', [OrganizationApplicationController::class, 'index']);
+    Route::get('/organization/opportunities/{opportunity}/applications', [OrganizationApplicationController::class, 'indexForOpportunity']);
+    Route::get('/organization/applications/{application}', [OrganizationApplicationController::class, 'show']);
 });
