@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Auth\AuthController;
+use App\Http\Controllers\Student\CVController;
 use App\Http\Controllers\Student\StudentProfileController;
 use Illuminate\Support\Facades\Route;
 
@@ -17,4 +18,11 @@ Route::middleware(['auth:sanctum', 'active', 'role:student'])->group(function ()
     Route::get('/student/profile', [StudentProfileController::class, 'show']);
     Route::post('/student/profile', [StudentProfileController::class, 'store']);
     Route::put('/student/profile', [StudentProfileController::class, 'update']);
+});
+
+Route::middleware(['auth:sanctum', 'active', 'role:student', 'profile.exists'])->group(function () {
+    Route::get('/student/cvs', [CVController::class, 'index']);
+    Route::post('/student/cvs', [CVController::class, 'store']);
+    Route::delete('/student/cvs/{cv}', [CVController::class, 'destroy']);
+    Route::put('/student/cvs/{cv}/default', [CVController::class, 'setDefault']);
 });
