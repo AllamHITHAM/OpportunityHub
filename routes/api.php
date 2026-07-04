@@ -3,6 +3,7 @@
 use App\Http\Controllers\Auth\AuthController;
 use App\Http\Controllers\Student\CVController;
 use App\Http\Controllers\Student\StudentProfileController;
+use App\Http\Controllers\Student\StudentSkillController;
 use Illuminate\Support\Facades\Route;
 
 Route::post('/register/student', [AuthController::class, 'registerStudent']);
@@ -25,4 +26,8 @@ Route::middleware(['auth:sanctum', 'active', 'role:student', 'profile.exists'])-
     Route::post('/student/cvs', [CVController::class, 'store']);
     Route::delete('/student/cvs/{cv}', [CVController::class, 'destroy']);
     Route::put('/student/cvs/{cv}/default', [CVController::class, 'setDefault']);
+
+    Route::get('/student/skills', [StudentSkillController::class, 'index']);
+    Route::post('/student/skills', [StudentSkillController::class, 'store']);
+    Route::delete('/student/skills/{studentSkill}', [StudentSkillController::class, 'destroy']);
 });
