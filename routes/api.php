@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Auth\AuthController;
 use App\Http\Controllers\Organization\OpportunityController;
+use App\Http\Controllers\Organization\OpportunitySkillController;
 use App\Http\Controllers\Organization\OrganizationProfileController;
 use App\Http\Controllers\Student\CVController;
 use App\Http\Controllers\Student\StudentProfileController;
@@ -43,4 +44,8 @@ Route::middleware(['auth:sanctum', 'active', 'role:organization'])->group(functi
     Route::get('/organization/opportunities/{opportunity}', [OpportunityController::class, 'show']);
     Route::put('/organization/opportunities/{opportunity}', [OpportunityController::class, 'update']);
     Route::delete('/organization/opportunities/{opportunity}', [OpportunityController::class, 'destroy']);
+
+    Route::get('/organization/opportunities/{opportunity}/skills', [OpportunitySkillController::class, 'index']);
+    Route::post('/organization/opportunities/{opportunity}/skills', [OpportunitySkillController::class, 'store']);
+    Route::delete('/organization/opportunities/{opportunity}/skills/{opportunitySkill}', [OpportunitySkillController::class, 'destroy']);
 });
