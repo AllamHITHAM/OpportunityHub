@@ -4,6 +4,7 @@ use App\Http\Controllers\Auth\AuthController;
 use App\Http\Controllers\Organization\OpportunityController;
 use App\Http\Controllers\Organization\OpportunitySkillController;
 use App\Http\Controllers\Organization\OrganizationProfileController;
+use App\Http\Controllers\Public\OpportunityController as PublicOpportunityController;
 use App\Http\Controllers\Student\CVController;
 use App\Http\Controllers\Student\StudentProfileController;
 use App\Http\Controllers\Student\StudentSkillController;
@@ -12,6 +13,9 @@ use Illuminate\Support\Facades\Route;
 Route::post('/register/student', [AuthController::class, 'registerStudent']);
 Route::post('/register/organization', [AuthController::class, 'registerOrganization']);
 Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:5,1');
+
+Route::get('/opportunities', [PublicOpportunityController::class, 'index']);
+Route::get('/opportunities/{opportunity}', [PublicOpportunityController::class, 'show']);
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
