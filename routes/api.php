@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Admin\DashboardController as AdminDashboardController;
 use App\Http\Controllers\Admin\OrganizationController as AdminOrganizationController;
 use App\Http\Controllers\Admin\SkillController as AdminSkillController;
 use App\Http\Controllers\Admin\UserController as AdminUserController;
@@ -7,6 +8,7 @@ use App\Http\Controllers\Auth\AuthController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\Organization\ApplicationAnalysisController;
 use App\Http\Controllers\Organization\ApplicationController as OrganizationApplicationController;
+use App\Http\Controllers\Organization\DashboardController as OrganizationDashboardController;
 use App\Http\Controllers\Organization\InterviewController as OrganizationInterviewController;
 use App\Http\Controllers\Organization\OpportunityController;
 use App\Http\Controllers\Organization\OpportunitySkillController;
@@ -14,6 +16,7 @@ use App\Http\Controllers\Organization\OrganizationProfileController;
 use App\Http\Controllers\Public\OpportunityController as PublicOpportunityController;
 use App\Http\Controllers\Student\ApplicationController as StudentApplicationController;
 use App\Http\Controllers\Student\CVController;
+use App\Http\Controllers\Student\DashboardController as StudentDashboardController;
 use App\Http\Controllers\Student\InterviewController as StudentInterviewController;
 use App\Http\Controllers\Student\StudentProfileController;
 use App\Http\Controllers\Student\StudentSkillController;
@@ -57,6 +60,8 @@ Route::middleware(['auth:sanctum', 'active', 'role:student', 'profile.exists'])-
     Route::get('/student/applications', [StudentApplicationController::class, 'index']);
 
     Route::get('/student/interviews', [StudentInterviewController::class, 'index']);
+
+    Route::get('/student/dashboard', [StudentDashboardController::class, 'index']);
 });
 
 Route::middleware(['auth:sanctum', 'active', 'role:organization'])->group(function () {
@@ -87,6 +92,8 @@ Route::middleware(['auth:sanctum', 'active', 'role:organization'])->group(functi
 
     Route::post('/organization/applications/{application}/analyze', [ApplicationAnalysisController::class, 'analyze']);
     Route::get('/organization/applications/{application}/analysis', [ApplicationAnalysisController::class, 'show']);
+
+    Route::get('/organization/dashboard', [OrganizationDashboardController::class, 'index']);
 });
 
 Route::middleware(['auth:sanctum', 'active', 'role:admin'])->group(function () {
@@ -101,4 +108,6 @@ Route::middleware(['auth:sanctum', 'active', 'role:admin'])->group(function () {
     Route::post('/admin/skills', [AdminSkillController::class, 'store']);
     Route::put('/admin/skills/{skill}', [AdminSkillController::class, 'update']);
     Route::delete('/admin/skills/{skill}', [AdminSkillController::class, 'destroy']);
+
+    Route::get('/admin/dashboard', [AdminDashboardController::class, 'index']);
 });
