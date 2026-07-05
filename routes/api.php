@@ -1,5 +1,8 @@
 <?php
 
+use App\Http\Controllers\Admin\OrganizationController as AdminOrganizationController;
+use App\Http\Controllers\Admin\SkillController as AdminSkillController;
+use App\Http\Controllers\Admin\UserController as AdminUserController;
 use App\Http\Controllers\Auth\AuthController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\Organization\ApplicationAnalysisController;
@@ -84,4 +87,18 @@ Route::middleware(['auth:sanctum', 'active', 'role:organization'])->group(functi
 
     Route::post('/organization/applications/{application}/analyze', [ApplicationAnalysisController::class, 'analyze']);
     Route::get('/organization/applications/{application}/analysis', [ApplicationAnalysisController::class, 'show']);
+});
+
+Route::middleware(['auth:sanctum', 'active', 'role:admin'])->group(function () {
+    Route::get('/admin/organizations', [AdminOrganizationController::class, 'index']);
+    Route::get('/admin/organizations/{organizationProfile}', [AdminOrganizationController::class, 'show']);
+    Route::put('/admin/organizations/{organizationProfile}/approval', [AdminOrganizationController::class, 'updateApproval']);
+
+    Route::get('/admin/users', [AdminUserController::class, 'index']);
+    Route::put('/admin/users/{user}/status', [AdminUserController::class, 'updateStatus']);
+
+    Route::get('/admin/skills', [AdminSkillController::class, 'index']);
+    Route::post('/admin/skills', [AdminSkillController::class, 'store']);
+    Route::put('/admin/skills/{skill}', [AdminSkillController::class, 'update']);
+    Route::delete('/admin/skills/{skill}', [AdminSkillController::class, 'destroy']);
 });
