@@ -61,4 +61,5 @@ Route::middleware(['auth:sanctum', 'active', 'role:organization'])->group(functi
     Route::get('/organization/applications', [OrganizationApplicationController::class, 'index']);
     Route::get('/organization/opportunities/{opportunity}/applications', [OrganizationApplicationController::class, 'indexForOpportunity']);
     Route::get('/organization/applications/{application}', [OrganizationApplicationController::class, 'show']);
+    Route::put('/organization/applications/{application}/status', [OrganizationApplicationController::class, 'updateStatus']);
 });
