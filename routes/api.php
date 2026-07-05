@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Auth\AuthController;
+use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\Organization\ApplicationAnalysisController;
 use App\Http\Controllers\Organization\ApplicationController as OrganizationApplicationController;
 use App\Http\Controllers\Organization\InterviewController as OrganizationInterviewController;
@@ -25,6 +26,12 @@ Route::get('/opportunities/{opportunity}', [PublicOpportunityController::class, 
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::get('/me', [AuthController::class, 'me']);
+});
+
+Route::middleware(['auth:sanctum', 'active'])->group(function () {
+    Route::get('/notifications', [NotificationController::class, 'index']);
+    Route::put('/notifications/read-all', [NotificationController::class, 'markAllAsRead']);
+    Route::put('/notifications/{notification}/read', [NotificationController::class, 'markAsRead']);
 });
 
 Route::middleware(['auth:sanctum', 'active', 'role:student'])->group(function () {
