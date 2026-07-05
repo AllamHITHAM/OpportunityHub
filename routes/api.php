@@ -2,12 +2,14 @@
 
 use App\Http\Controllers\Auth\AuthController;
 use App\Http\Controllers\Organization\ApplicationController as OrganizationApplicationController;
+use App\Http\Controllers\Organization\InterviewController as OrganizationInterviewController;
 use App\Http\Controllers\Organization\OpportunityController;
 use App\Http\Controllers\Organization\OpportunitySkillController;
 use App\Http\Controllers\Organization\OrganizationProfileController;
 use App\Http\Controllers\Public\OpportunityController as PublicOpportunityController;
 use App\Http\Controllers\Student\ApplicationController as StudentApplicationController;
 use App\Http\Controllers\Student\CVController;
+use App\Http\Controllers\Student\InterviewController as StudentInterviewController;
 use App\Http\Controllers\Student\StudentProfileController;
 use App\Http\Controllers\Student\StudentSkillController;
 use Illuminate\Support\Facades\Route;
@@ -42,6 +44,8 @@ Route::middleware(['auth:sanctum', 'active', 'role:student', 'profile.exists'])-
 
     Route::post('/opportunities/{opportunity}/apply', [StudentApplicationController::class, 'store']);
     Route::get('/student/applications', [StudentApplicationController::class, 'index']);
+
+    Route::get('/student/interviews', [StudentInterviewController::class, 'index']);
 });
 
 Route::middleware(['auth:sanctum', 'active', 'role:organization'])->group(function () {
@@ -62,4 +66,11 @@ Route::middleware(['auth:sanctum', 'active', 'role:organization'])->group(functi
     Route::get('/organization/opportunities/{opportunity}/applications', [OrganizationApplicationController::class, 'indexForOpportunity']);
     Route::get('/organization/applications/{application}', [OrganizationApplicationController::class, 'show']);
     Route::put('/organization/applications/{application}/status', [OrganizationApplicationController::class, 'updateStatus']);
+
+    Route::post('/organization/applications/{application}/interview', [OrganizationInterviewController::class, 'store']);
+    Route::get('/organization/interviews', [OrganizationInterviewController::class, 'index']);
+    Route::get('/organization/interviews/{interview}', [OrganizationInterviewController::class, 'show']);
+    Route::put('/organization/interviews/{interview}', [OrganizationInterviewController::class, 'update']);
+    Route::put('/organization/interviews/{interview}/complete', [OrganizationInterviewController::class, 'complete']);
+    Route::delete('/organization/interviews/{interview}', [OrganizationInterviewController::class, 'destroy']);
 });
