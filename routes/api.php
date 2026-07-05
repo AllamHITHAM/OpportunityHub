@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Auth\AuthController;
+use App\Http\Controllers\Organization\ApplicationAnalysisController;
 use App\Http\Controllers\Organization\ApplicationController as OrganizationApplicationController;
 use App\Http\Controllers\Organization\InterviewController as OrganizationInterviewController;
 use App\Http\Controllers\Organization\OpportunityController;
@@ -73,4 +74,7 @@ Route::middleware(['auth:sanctum', 'active', 'role:organization'])->group(functi
     Route::put('/organization/interviews/{interview}', [OrganizationInterviewController::class, 'update']);
     Route::put('/organization/interviews/{interview}/complete', [OrganizationInterviewController::class, 'complete']);
     Route::delete('/organization/interviews/{interview}', [OrganizationInterviewController::class, 'destroy']);
+
+    Route::post('/organization/applications/{application}/analyze', [ApplicationAnalysisController::class, 'analyze']);
+    Route::get('/organization/applications/{application}/analysis', [ApplicationAnalysisController::class, 'show']);
 });
