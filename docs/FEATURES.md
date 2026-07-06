@@ -47,24 +47,23 @@ Flutter:
 
 ---
 
-## Company Profile
+## Organization Profile
 
 Tables:
 - users
-- company_profiles
+- organization_profiles
 
 APIs:
-- GET /api/company/profile
-- POST /api/company/profile
-- PUT /api/company/profile
+- GET /api/organization/profile
+- PUT /api/organization/profile
 
 Backend:
-- CompanyProfileController
-- CompanyProfile model
+- OrganizationProfileController
+- OrganizationProfile model
 
 Flutter:
-- Company Profile Screen
-- Edit Company Profile Screen
+- Organization Profile Screen
+- Edit Organization Profile Screen
 
 ---
 
@@ -76,12 +75,17 @@ Tables:
 - opportunity_skills
 
 APIs:
-- GET /api/skills
+- GET /api/skills (planned, not yet implemented — no public skill-catalog browse endpoint exists today)
+- GET /api/student/skills
 - POST /api/student/skills
 - DELETE /api/student/skills/{id}
+- GET /api/admin/skills
+- POST /api/admin/skills
+- PUT /api/admin/skills/{id}
+- DELETE /api/admin/skills/{id}
 
 Backend:
-- SkillController
+- Admin\SkillController
 - StudentSkillController
 - Skill model
 
@@ -117,14 +121,14 @@ Flutter:
 Tables:
 - opportunities
 - opportunity_skills
-- company_profiles
+- organization_profiles
 
 APIs:
 - GET /api/opportunities
 - GET /api/opportunities/{id}
-- POST /api/company/opportunities
-- PUT /api/company/opportunities/{id}
-- DELETE /api/company/opportunities/{id}
+- POST /api/organization/opportunities
+- PUT /api/organization/opportunities/{id}
+- DELETE /api/organization/opportunities/{id}
 
 Backend:
 - OpportunityController
@@ -148,8 +152,8 @@ Tables:
 APIs:
 - POST /api/opportunities/{id}/apply
 - GET /api/student/applications
-- GET /api/company/opportunities/{id}/applications
-- PUT /api/company/applications/{id}/status
+- GET /api/organization/opportunities/{id}/applications
+- PUT /api/organization/applications/{id}/status
 
 Backend:
 - ApplicationController
@@ -168,9 +172,9 @@ Tables:
 - applications
 
 APIs:
-- POST /api/company/applications/{id}/interview
+- POST /api/organization/applications/{id}/interview
 - GET /api/student/interviews
-- GET /api/company/interviews
+- GET /api/organization/interviews
 
 Backend:
 - InterviewController
@@ -211,11 +215,12 @@ Tables:
 - applications
 
 APIs:
-- triggered internally when applying
+- POST /api/organization/applications/{id}/analyze (organization-triggered, on demand — not automatic on application submission)
+- GET /api/organization/applications/{id}/analysis (read-only, returns the stored result)
 
 Backend:
 - MatchingService
-- ApplicationController
+- ApplicationAnalysisController
 
 Flutter:
-- Company Applicants Screen
+- Organization Applicants Screen
