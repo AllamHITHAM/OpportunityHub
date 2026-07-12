@@ -18,6 +18,7 @@ class AuthController extends Controller
     public function registerStudent(RegisterStudentRequest $request): JsonResponse
     {
         $user = User::create($request->only(['name', 'email', 'password']));
+        $user->refresh();
 
         $token = $user->createToken('auth_token')->plainTextToken;
 
@@ -37,6 +38,7 @@ class AuthController extends Controller
             $user = User::create($request->only(['name', 'email', 'password']));
             $user->role = 'organization';
             $user->save();
+            $user->refresh();
 
             OrganizationProfile::create([
                 'user_id' => $user->id,
