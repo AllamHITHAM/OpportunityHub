@@ -23,4 +23,14 @@ class Interview extends Model
     {
         return $this->belongsTo(Application::class);
     }
+
+    protected function casts(): array
+    {
+        return [
+            'scheduled_at' => 'datetime',
+            'completed_at' => 'datetime',
+            'duration_minutes' => 'integer',
+            'rating' => 'integer',
+        ];
+    }
 }

@@ -23,4 +23,11 @@ class StudentSkill extends Model
     {
         return $this->belongsTo(Skill::class);
     }
+
+    protected function casts(): array
+    {
+        return [
+            'years_of_experience' => 'decimal:1',
+        ];
+    }
 }

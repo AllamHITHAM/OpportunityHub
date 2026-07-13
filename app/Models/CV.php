@@ -31,4 +31,13 @@ class CV extends Model
     {
         return $this->hasMany(Application::class, 'cv_id');
     }
+
+    protected function casts(): array
+    {
+        return [
+            'is_default' => 'boolean',
+            'created_by_ai' => 'boolean',
+            'version' => 'integer',
+        ];
+    }
 }

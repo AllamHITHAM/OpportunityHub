@@ -40,4 +40,14 @@ class Opportunity extends Model
     {
         return $this->hasMany(Application::class);
     }
+
+    protected function casts(): array
+    {
+        return [
+            'salary_min' => 'decimal:2',
+            'salary_max' => 'decimal:2',
+            'application_deadline' => 'date',
+            'positions_available' => 'integer',
+        ];
+    }
 }

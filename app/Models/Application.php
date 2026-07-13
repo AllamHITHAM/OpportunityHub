@@ -34,4 +34,13 @@ class Application extends Model
     {
         return $this->hasOne(Interview::class);
     }
+
+    protected function casts(): array
+    {
+        return [
+            'match_score' => 'decimal:2',
+            'applied_at' => 'datetime',
+            'reviewed_at' => 'datetime',
+        ];
+    }
 }
