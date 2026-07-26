@@ -18,6 +18,10 @@ class StudentProfile extends Model
         'profile_image',
     ];
 
+    protected $casts = [
+        'graduation_year' => 'integer',
+    ];
+
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);

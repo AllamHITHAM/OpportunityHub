@@ -80,7 +80,7 @@ Examples:
 
 - User
 - StudentProfile
-- CompanyProfile
+- OrganizationProfile
 - Skill
 - Opportunity
 - Application
@@ -113,7 +113,7 @@ CVs
 
 Profile Images
 
-Company Logos
+Organization Logos
 
 will be stored using Laravel Storage.
 

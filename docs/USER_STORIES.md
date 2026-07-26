@@ -26,7 +26,7 @@ So that I can access my profile and opportunities.
 
 As a student,
 I want to complete and update my profile,
-So that companies can know more about me.
+So that organizations can know more about me.
 
 ---
 
@@ -66,7 +66,7 @@ Filters may include:
 - Category
 - Location
 - Work mode
-- Company
+- Organization
 - Required skills
 
 ---
@@ -83,7 +83,7 @@ So that I can decide whether to apply.
 
 As a student,
 I want to apply to an opportunity,
-So that the company can review my application.
+So that the organization can review my application.
 
 ---
 
@@ -111,27 +111,27 @@ So that I never miss important updates.
 
 ---
 
-# Company
+# Organization
 
 ## Registration
 
-As a company,
-I want to create a company account,
+As an organization,
+I want to create an organization account,
 So that I can recruit candidates.
 
 ---
 
-## Complete Company Profile
+## Complete Organization Profile
 
-As a company,
-I want to complete my company profile,
+As an organization,
+I want to complete my organization profile,
 So that students know who we are.
 
 ---
 
 ## Publish Opportunities
 
-As a company,
+As an organization,
 I want to publish jobs and internships,
 So that students can apply.
 
@@ -139,7 +139,7 @@ So that students can apply.
 
 ## Manage Opportunities
 
-As a company,
+As an organization,
 I want to edit, close, or reopen opportunities,
 So that my listings stay updated.
 
@@ -147,7 +147,7 @@ So that my listings stay updated.
 
 ## View Applicants
 
-As a company,
+As an organization,
 I want to view everyone who applied,
 So that I can select suitable candidates.
 
@@ -155,7 +155,7 @@ So that I can select suitable candidates.
 
 ## View AI Matching
 
-As a company,
+As an organization,
 I want to see the AI matching score,
 So that I can review candidates more efficiently.
 
@@ -163,7 +163,7 @@ So that I can review candidates more efficiently.
 
 ## Update Application Status
 
-As a company,
+As an organization,
 I want to change the application status,
 So that students know the result.
 
@@ -180,7 +180,7 @@ Possible statuses:
 
 ## Schedule Interview
 
-As a company,
+As an organization,
 I want to schedule interviews,
 So that I can meet selected candidates.
 
@@ -188,7 +188,7 @@ So that I can meet selected candidates.
 
 ## Send Notifications
 
-As a company,
+As an organization,
 I want students to receive automatic notifications after important actions.
 
 ---
@@ -203,11 +203,11 @@ So that the platform remains secure.
 
 ---
 
-## Approve Companies
+## Approve Organizations
 
 As an admin,
-I want to approve or reject company accounts,
-So that only trusted companies can publish opportunities.
+I want to approve or reject organization accounts,
+So that only trusted organizations can publish opportunities.
 
 ---
 
@@ -237,7 +237,7 @@ Statistics may include:
 
 - Total users
 - Students
-- Companies
+- Organizations
 - Opportunities
 - Applications
 - Interviews
@@ -248,7 +248,7 @@ Statistics may include:
 
 ## Candidate Matching
 
-As a company,
+As an organization,
 I want applicants ranked by matching score,
 So that I can identify the best candidates quickly.
 
@@ -266,7 +266,7 @@ So that I discover suitable opportunities automatically.
 
 The system should automatically notify users when:
 
-- Company account approved
+- Organization account approved
 - Opportunity published
 - Application submitted
 - Application reviewed
@@ -279,8 +279,8 @@ The system should automatically notify users when:
 # Future Features
 
 - Saved Opportunities
-- Favorite Companies
-- Messaging between student and company
+- Favorite Organizations
+- Messaging between student and organization
 - Email Notifications
 - Calendar Integration
 - AI CV Improvement Suggestions

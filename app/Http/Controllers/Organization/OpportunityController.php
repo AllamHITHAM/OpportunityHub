@@ -33,9 +33,11 @@ class OpportunityController extends Controller
         ], 201);
     }
 
-    public function show(Opportunity $opportunity, Request $request): JsonResponse
+    public function show(int $opportunity, Request $request): JsonResponse
     {
-        if ($opportunity->organization_id !== $request->user()->organizationProfile->id) {
+        $opportunity = Opportunity::find($opportunity);
+
+        if (! $opportunity || $opportunity->organization_id !== $request->user()->organizationProfile->id) {
             return response()->json([
                 'success' => false,
                 'message' => 'Opportunity not found',
@@ -50,9 +52,11 @@ class OpportunityController extends Controller
         ]);
     }
 
-    public function update(UpdateOpportunityRequest $request, Opportunity $opportunity): JsonResponse
+    public function update(UpdateOpportunityRequest $request, int $opportunity): JsonResponse
     {
-        if ($opportunity->organization_id !== $request->user()->organizationProfile->id) {
+        $opportunity = Opportunity::find($opportunity);
+
+        if (! $opportunity || $opportunity->organization_id !== $request->user()->organizationProfile->id) {
             return response()->json([
                 'success' => false,
                 'message' => 'Opportunity not found',
@@ -69,9 +73,11 @@ class OpportunityController extends Controller
         ]);
     }
 
-    public function destroy(Opportunity $opportunity, Request $request): JsonResponse
+    public function destroy(int $opportunity, Request $request): JsonResponse
     {
-        if ($opportunity->organization_id !== $request->user()->organizationProfile->id) {
+        $opportunity = Opportunity::find($opportunity);
+
+        if (! $opportunity || $opportunity->organization_id !== $request->user()->organizationProfile->id) {
             return response()->json([
                 'success' => false,
                 'message' => 'Opportunity not found',

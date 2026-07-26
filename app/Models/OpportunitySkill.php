@@ -22,4 +22,11 @@ class OpportunitySkill extends Model
     {
         return $this->belongsTo(Skill::class);
     }
+
+    protected function casts(): array
+    {
+        return [
+            'is_required' => 'boolean',
+        ];
+    }
 }
