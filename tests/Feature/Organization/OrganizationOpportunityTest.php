@@ -239,6 +239,22 @@ class OrganizationOpportunityTest extends TestCase
             ->assertJsonCount(0, 'data.data');
     }
 
+    /**
+     * Route-model binding throws ModelNotFoundException for a nonexistent ID before the
+     * controller ever runs, so this must return the app's standard JSON envelope (via the
+     * NotFoundHttpException renderable in bootstrap/app.php) instead of a raw debug exception.
+     */
+    public function test_public_endpoint_returns_clean_404_for_a_nonexistent_opportunity(): void
+    {
+        $response = $this->getJson('/api/opportunities/999999');
+
+        $response->assertStatus(404)
+            ->assertJsonPath('success', false)
+            ->assertJsonPath('data', null)
+            ->assertJsonMissingPath('exception')
+            ->assertJsonMissingPath('trace');
+    }
+
     private function organizationWithProfile(string $approvalStatus = 'approved'): object
     {
         $user = User::factory()->create([
