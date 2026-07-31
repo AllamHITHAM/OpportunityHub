@@ -17,7 +17,7 @@ class ApplicationController extends Controller
 
         $applications = Application::whereHas('opportunity', function ($query) use ($organizationId) {
             $query->where('organization_id', $organizationId);
-        })->with(['opportunity', 'studentProfile', 'cv'])->get();
+        })->with(['opportunity', 'studentProfile.user', 'cv'])->get();
 
         return response()->json([
             'success' => true,
@@ -36,7 +36,7 @@ class ApplicationController extends Controller
             ], 404);
         }
 
-        $applications = $opportunity->applications()->with(['studentProfile', 'cv'])->get();
+        $applications = $opportunity->applications()->with(['studentProfile.user', 'cv'])->get();
 
         return response()->json([
             'success' => true,
@@ -58,7 +58,7 @@ class ApplicationController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Application retrieved successfully',
-            'data' => $application->load(['opportunity', 'studentProfile', 'cv']),
+            'data' => $application->load(['opportunity', 'studentProfile.user', 'cv']),
         ]);
     }
 
@@ -87,7 +87,7 @@ class ApplicationController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Application status updated successfully',
-            'data' => $application->fresh(['opportunity', 'studentProfile', 'cv']),
+            'data' => $application->fresh(['opportunity', 'studentProfile.user', 'cv']),
         ]);
     }
 }

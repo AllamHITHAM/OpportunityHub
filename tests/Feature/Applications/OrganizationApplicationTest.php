@@ -167,6 +167,84 @@ class OrganizationApplicationTest extends TestCase
             ->assertJsonPath('data.0.id', $applicationA->id);
     }
 
+    public function test_organization_applications_list_includes_nested_student_user_identity(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity);
+        $studentUser = $application->studentProfile->user;
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->getJson('/api/organization/applications');
+
+        $response->assertStatus(200)
+            ->assertJsonPath('data.0.student_profile.user.id', $studentUser->id)
+            ->assertJsonPath('data.0.student_profile.user.name', $studentUser->name)
+            ->assertJsonPath('data.0.student_profile.user.email', $studentUser->email)
+            ->assertJsonMissingPath('data.0.student_profile.user.password')
+            ->assertJsonMissingPath('data.0.student_profile.user.remember_token');
+    }
+
+    public function test_opportunity_applicants_list_includes_nested_student_user_identity(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity);
+        $studentUser = $application->studentProfile->user;
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->getJson("/api/organization/opportunities/{$opportunity->id}/applications");
+
+        $response->assertStatus(200)
+            ->assertJsonPath('data.0.student_profile.user.id', $studentUser->id)
+            ->assertJsonPath('data.0.student_profile.user.name', $studentUser->name)
+            ->assertJsonPath('data.0.student_profile.user.email', $studentUser->email)
+            ->assertJsonMissingPath('data.0.student_profile.user.password')
+            ->assertJsonMissingPath('data.0.student_profile.user.remember_token');
+    }
+
+    public function test_application_details_includes_nested_student_user_identity(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity);
+        $studentUser = $application->studentProfile->user;
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->getJson("/api/organization/applications/{$application->id}");
+
+        $response->assertStatus(200)
+            ->assertJsonPath('data.student_profile.user.id', $studentUser->id)
+            ->assertJsonPath('data.student_profile.user.name', $studentUser->name)
+            ->assertJsonPath('data.student_profile.user.email', $studentUser->email)
+            ->assertJsonMissingPath('data.student_profile.user.password')
+            ->assertJsonMissingPath('data.student_profile.user.remember_token');
+    }
+
+    public function test_status_update_response_includes_nested_student_user_identity(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity);
+        $studentUser = $application->studentProfile->user;
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->putJson("/api/organization/applications/{$application->id}/status", [
+            'status' => 'reviewed',
+        ]);
+
+        $response->assertStatus(200)
+            ->assertJsonPath('data.student_profile.user.id', $studentUser->id)
+            ->assertJsonPath('data.student_profile.user.name', $studentUser->name)
+            ->assertJsonPath('data.student_profile.user.email', $studentUser->email)
+            ->assertJsonMissingPath('data.student_profile.user.password')
+            ->assertJsonMissingPath('data.student_profile.user.remember_token');
+    }
+
     private function approvedOrganization(): object
     {
         $user = User::factory()->create([
