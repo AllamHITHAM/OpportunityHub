@@ -8,6 +8,7 @@ use App\Http\Controllers\Auth\AuthController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\Organization\ApplicationAnalysisController;
 use App\Http\Controllers\Organization\ApplicationController as OrganizationApplicationController;
+use App\Http\Controllers\Organization\AssessmentController as OrganizationAssessmentController;
 use App\Http\Controllers\Organization\DashboardController as OrganizationDashboardController;
 use App\Http\Controllers\Organization\InterviewController as OrganizationInterviewController;
 use App\Http\Controllers\Organization\OpportunityController;
@@ -15,6 +16,7 @@ use App\Http\Controllers\Organization\OpportunitySkillController;
 use App\Http\Controllers\Organization\OrganizationProfileController;
 use App\Http\Controllers\Public\OpportunityController as PublicOpportunityController;
 use App\Http\Controllers\Student\ApplicationController as StudentApplicationController;
+use App\Http\Controllers\Student\AssessmentController as StudentAssessmentController;
 use App\Http\Controllers\Student\CVController;
 use App\Http\Controllers\Student\DashboardController as StudentDashboardController;
 use App\Http\Controllers\Student\InterviewController as StudentInterviewController;
@@ -61,6 +63,9 @@ Route::middleware(['auth:sanctum', 'active', 'role:student', 'profile.exists'])-
 
     Route::get('/student/interviews', [StudentInterviewController::class, 'index']);
 
+    Route::get('/student/assessments', [StudentAssessmentController::class, 'index']);
+    Route::get('/student/assessments/{assessment}', [StudentAssessmentController::class, 'show']);
+
     Route::get('/student/dashboard', [StudentDashboardController::class, 'index']);
 });
 
@@ -89,6 +94,9 @@ Route::middleware(['auth:sanctum', 'active', 'role:organization'])->group(functi
     Route::put('/organization/interviews/{interview}', [OrganizationInterviewController::class, 'update']);
     Route::put('/organization/interviews/{interview}/complete', [OrganizationInterviewController::class, 'complete']);
     Route::delete('/organization/interviews/{interview}', [OrganizationInterviewController::class, 'destroy']);
+
+    Route::get('/organization/applications/{application}/assessment', [OrganizationAssessmentController::class, 'showForApplication']);
+    Route::get('/organization/assessments/{assessment}', [OrganizationAssessmentController::class, 'show']);
 
     Route::post('/organization/applications/{application}/analyze', [ApplicationAnalysisController::class, 'analyze']);
     Route::get('/organization/applications/{application}/analysis', [ApplicationAnalysisController::class, 'show']);

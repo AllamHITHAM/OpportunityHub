@@ -258,16 +258,42 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 ## 6. Interviews
 
+**As of Phase 4A-1, an Interview is a detail record hanging off a generic `Assessment` (see section 7) rather than being attached to `Application` directly.** Every route, request body, status code, and business rule documented below is unchanged from before Phase 4A-1 — this phase is a backend restructuring only.
+
+**Response shape is fully backward compatible.** Every endpoint below still returns the pre-Phase-4A-1 top-level `data.application` object exactly as before (an `Interview` model's `application` is now a computed/appended attribute resolved through `assessment`, not a real column — see `app/Models/Interview.php`), and **additively** returns a new `data.assessment` object alongside it:
+
+```json
+{
+  "id": 1,
+  "assessment_id": 1,
+  "interview_type": "phone",
+  "scheduled_at": "...",
+  "status": "scheduled",
+  "decision": "pending",
+  "application": { "id": 5, "status": "interview_scheduled", "...": "..." },
+  "assessment": {
+    "id": 1,
+    "application_id": 5,
+    "type": "interview",
+    "status": "scheduled",
+    "result": null,
+    "application": { "id": 5, "...": "..." }
+  }
+}
+```
+
+`data.application.id` and `data.assessment.application_id` (and `data.assessment.application.id`) always refer to the same application. `data.assessment` never nests an `interview` back inside itself — only `application` is loaded on it, so there is no `Interview → Assessment → Interview` cycle in any response.
+
 ### POST /api/organization/applications/{application}/interview
 - Middleware: `auth:sanctum, active, role:organization`
 - Body: `interview_type` (required, in: onsite, online, phone), `scheduled_at` (required, date), `duration_minutes` (nullable, integer, min:1, default 60), `meeting_link` (required if `interview_type=online`), `location` (required if `interview_type=onsite`), `interviewer_name`/`interviewer_email`/`notes` (nullable)
-- Preconditions: application must be `shortlisted` or `interview_scheduled` (422 otherwise); one interview per application max (409 if one already exists).
-- Success: 201 — also sets the application's `status = interview_scheduled` and `reviewed_at = now()`, in one DB transaction.
+- Preconditions: application must be `shortlisted` or `interview_scheduled` (422 otherwise); one interview per application max (409 if one already exists) — enforced via the one-`Assessment`-per-`Application` rule (section 7), not directly on `interviews` any more.
+- Success: 201 — in one DB transaction: creates an `Assessment` (`type=interview`, `status=scheduled`), creates the `Interview` under it, and sets the application's `status = interview_scheduled` and `reviewed_at = now()`, exactly as before. Response `data` is the interview in the shape above.
 - Errors: 401, 403, 404, 409, 422
 
 ### GET /api/organization/interviews
 - Same middleware
-- Success: 200 — every interview across this organization's applications
+- Success: 200 — every interview across this organization's applications, each in the shape above
 - Errors: 401, 403
 
 ### GET /api/organization/interviews/{interview}
@@ -284,20 +310,48 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 ### PUT /api/organization/interviews/{interview}/complete
 - Same middleware
 - Body: `decision` (nullable, in: passed, failed, waiting — no `pending`), `rating` (nullable, integer, min:1 only — no fixed upper bound), `company_feedback` (nullable, max:2000)
-- Success: 200 — sets `status = completed`, `completed_at = now()`, plus any provided outcome fields. Does **not** change the related application's status.
+- Success: 200 — sets `status = completed`, `completed_at = now()`, plus any provided outcome fields, exactly as before. Also mirrors the outcome onto the parent `Assessment`: `status = completed`, `completed_at` copied, `result` set from `decision` (`passed`/`failed`/`waiting`; no decision provided leaves `result = null`). Still does **not** change the related application's status — the organization always makes that call separately via the status endpoint.
 - Errors: 401, 403, 404, 422
 
 ### DELETE /api/organization/interviews/{interview}
 - Same middleware
-- Success: 200 — hard delete; does not change the related application's status
+- Success: 200 — hard delete. Deletes the parent `Assessment` (which cascades to the `Interview` at the database level). **Behavior change from before Phase 4A-1:** if the application's status was `interview_scheduled`, it is now reverted to `shortlisted` in the same operation, so an application is never left at `interview_scheduled` with no assessment behind it. If the application's status is anything else (e.g. an organization already moved it on to `accepted`/`rejected` independently), it is left untouched.
 - Errors: 401, 403, 404, 409 ("Completed interviews cannot be deleted")
 
 ### GET /api/student/interviews
-- See section 2.
+- See section 2. Response is in the same shape as above — `data[].application.opportunity` (legacy path, unchanged) and, additively, `data[].assessment.application.opportunity`.
 
 ---
 
-## 7. AI Matching
+## 7. Assessments
+
+Added in Phase 4A-1 as the generic entity that will eventually let an organization choose **Interview or Quiz** (or no formal assessment) once a shortlisted application. **This phase adds read-only Assessment APIs only** — creating/updating an assessment still only happens implicitly, through the Interview endpoints in section 6. There is no generic "create assessment" or "choose assessment type" endpoint yet, no Quiz support, and no student accept/decline endpoint yet — those are future phases.
+
+An application has at most one `Assessment`. An `Assessment` has `type` (`interview` or `quiz` — only `interview` is ever populated today), `status` (`pending, scheduled, in_progress, completed, declined, cancelled`), and `result` (`null`, `pending`, `passed`, `failed`, or `waiting` — a decision not yet recorded is represented as `null`, not the string `"pending"`).
+
+### GET /api/organization/applications/{application}/assessment
+- Middleware: `auth:sanctum, active, role:organization`
+- Success: 200 — `{"data": null}` if the (owned) application has no assessment yet; otherwise the assessment with `application` and `interview` (when `type=interview`) nested.
+- Errors: 401, 403, 404 (application not owned by this organization)
+
+### GET /api/organization/assessments/{assessment}
+- Same middleware
+- Success: 200 — the assessment with `application` and `interview` nested
+- Errors: 401, 403, 404 (assessment not owned by this organization)
+
+### GET /api/student/assessments
+- Middleware: `auth:sanctum, active, role:student`
+- Success: 200 — every assessment belonging to the authenticated student's own applications, each with `application` and `interview` nested
+- Errors: 401, 403
+
+### GET /api/student/assessments/{assessment}
+- Same middleware
+- Success: 200
+- Errors: 401, 403, 404 (assessment does not belong to this student)
+
+---
+
+## 8. AI Matching
 
 Both endpoints run the same rule-based `MatchingService` (skills compared against opportunity requirements, a rough experience heuristic, and a fixed neutral placeholder for education, weighted 62.5/25/12.5). **Not** triggered automatically on application submission — both are explicit, organization-triggered, on-demand calls.
 
@@ -313,7 +367,9 @@ Both endpoints run the same rule-based `MatchingService` (skills compared agains
 
 ---
 
-## 8. Notifications
+## 9. Notifications
+
+**Not yet created by any endpoint as of Phase 4A-1.** The routes below can read/mark-as-read existing rows, but nothing in the application writes a `Notification` row — not for applications, not for interviews/assessments. This is deferred to a later phase (see docs/BUSINESS_RULES.md).
 
 ### GET /api/notifications
 - Middleware: `auth:sanctum, active` (any role)
@@ -332,7 +388,7 @@ Both endpoints run the same rule-based `MatchingService` (skills compared agains
 
 ---
 
-## 9. Admin
+## 10. Admin
 
 ### GET /api/admin/organizations
 - Middleware: `auth:sanctum, active, role:admin`
@@ -390,6 +446,6 @@ Both endpoints run the same rule-based `MatchingService` (skills compared agains
 
 ---
 
-## 10. Dashboard
+## 11. Dashboard
 
 Dashboard routes are listed under their respective role sections above (`/api/student/dashboard`, `/api/organization/dashboard`, `/api/admin/dashboard`) since each is protected by that role's middleware group, not a separate one.

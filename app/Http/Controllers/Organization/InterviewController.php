@@ -33,7 +33,7 @@ class InterviewController extends Controller
             ], 422);
         }
 
-        if ($application->interview()->exists()) {
+        if ($application->assessment()->exists()) {
             return response()->json([
                 'success' => false,
                 'message' => 'An interview already exists for this application',
@@ -43,7 +43,13 @@ class InterviewController extends Controller
 
         try {
             $interview = DB::transaction(function () use ($request, $application) {
-                $interview = $application->interview()->create($request->validated());
+                $assessment = $application->assessment()->create([
+                    'type' => 'interview',
+                    'status' => 'scheduled',
+                    'result' => null,
+                ]);
+
+                $interview = $assessment->interview()->create($request->validated());
 
                 $application->status = 'interview_scheduled';
                 $application->reviewed_at = now();
@@ -62,7 +68,7 @@ class InterviewController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Interview scheduled successfully',
-            'data' => $interview->load('application'),
+            'data' => $interview->load('assessment.application'),
         ], 201);
     }
 
@@ -70,9 +76,9 @@ class InterviewController extends Controller
     {
         $organizationId = $request->user()->organizationProfile->id;
 
-        $interviews = Interview::whereHas('application.opportunity', function ($query) use ($organizationId) {
+        $interviews = Interview::whereHas('assessment.application.opportunity', function ($query) use ($organizationId) {
             $query->where('organization_id', $organizationId);
-        })->with('application')->get();
+        })->with('assessment.application')->get();
 
         return response()->json([
             'success' => true,
@@ -83,7 +89,7 @@ class InterviewController extends Controller
 
     public function show(Interview $interview, Request $request): JsonResponse
     {
-        if ($interview->application->opportunity->organization_id !== $request->user()->organizationProfile->id) {
+        if ($interview->assessment->application->opportunity->organization_id !== $request->user()->organizationProfile->id) {
             return response()->json([
                 'success' => false,
                 'message' => 'Interview not found',
@@ -94,13 +100,13 @@ class InterviewController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Interview retrieved successfully',
-            'data' => $interview->load('application'),
+            'data' => $interview->load('assessment.application'),
         ]);
     }
 
     public function update(UpdateInterviewRequest $request, Interview $interview): JsonResponse
     {
-        if ($interview->application->opportunity->organization_id !== $request->user()->organizationProfile->id) {
+        if ($interview->assessment->application->opportunity->organization_id !== $request->user()->organizationProfile->id) {
             return response()->json([
                 'success' => false,
                 'message' => 'Interview not found',
@@ -113,13 +119,13 @@ class InterviewController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Interview updated successfully',
-            'data' => $interview->fresh('application'),
+            'data' => $interview->fresh('assessment.application'),
         ]);
     }
 
     public function complete(CompleteInterviewRequest $request, Interview $interview): JsonResponse
     {
-        if ($interview->application->opportunity->organization_id !== $request->user()->organizationProfile->id) {
+        if ($interview->assessment->application->opportunity->organization_id !== $request->user()->organizationProfile->id) {
             return response()->json([
                 'success' => false,
                 'message' => 'Interview not found',
@@ -127,33 +133,44 @@ class InterviewController extends Controller
             ], 404);
         }
 
-        $interview->status = 'completed';
-        $interview->completed_at = now();
+        DB::transaction(function () use ($request, $interview) {
+            $interview->status = 'completed';
+            $interview->completed_at = now();
 
-        if ($request->filled('decision')) {
-            $interview->decision = $request->validated('decision');
-        }
+            if ($request->filled('decision')) {
+                $interview->decision = $request->validated('decision');
+            }
 
-        if ($request->filled('rating')) {
-            $interview->rating = $request->validated('rating');
-        }
+            if ($request->filled('rating')) {
+                $interview->rating = $request->validated('rating');
+            }
 
-        if ($request->filled('company_feedback')) {
-            $interview->company_feedback = $request->validated('company_feedback');
-        }
+            if ($request->filled('company_feedback')) {
+                $interview->company_feedback = $request->validated('company_feedback');
+            }
 
-        $interview->save();
+            $interview->save();
+
+            // The assessment mirrors the interview's shared lifecycle
+            // state -- it never drives the application's recruitment
+            // status, which stays under the organization's manual control.
+            $assessment = $interview->assessment;
+            $assessment->status = 'completed';
+            $assessment->completed_at = $interview->completed_at;
+            $assessment->result = $this->assessmentResultFor($interview->decision);
+            $assessment->save();
+        });
 
         return response()->json([
             'success' => true,
             'message' => 'Interview marked as completed',
-            'data' => $interview->fresh('application'),
+            'data' => $interview->fresh('assessment.application'),
         ]);
     }
 
     public function destroy(Interview $interview, Request $request): JsonResponse
     {
-        if ($interview->application->opportunity->organization_id !== $request->user()->organizationProfile->id) {
+        if ($interview->assessment->application->opportunity->organization_id !== $request->user()->organizationProfile->id) {
             return response()->json([
                 'success' => false,
                 'message' => 'Interview not found',
@@ -169,12 +186,38 @@ class InterviewController extends Controller
             ], 409);
         }
 
-        $interview->delete();
+        DB::transaction(function () use ($interview) {
+            $assessment = $interview->assessment;
+            $application = $assessment->application;
+
+            // Cascades to the Interview row via assessments.id -> interviews.assessment_id.
+            $assessment->delete();
+
+            // Never leave an application at `interview_scheduled` once its
+            // only assessment is gone.
+            if ($application->status === 'interview_scheduled') {
+                $application->status = 'shortlisted';
+                $application->save();
+            }
+        });
 
         return response()->json([
             'success' => true,
             'message' => 'Interview deleted successfully',
             'data' => null,
         ]);
+    }
+
+    /**
+     * interviews.decision -> assessments.result. No decision recorded yet
+     * (`null`/`pending`) maps to `null` -- matching the convention
+     * documented on the assessments migration/model.
+     */
+    private function assessmentResultFor(?string $decision): ?string
+    {
+        return match ($decision) {
+            'passed', 'failed', 'waiting' => $decision,
+            default => null,
+        };
     }
 }

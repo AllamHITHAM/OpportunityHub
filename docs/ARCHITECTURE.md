@@ -99,6 +99,41 @@ Never manually create tables in phpMyAdmin.
 
 ---
 
+## Assessment Architecture (Phase 4A-1)
+
+An `Application`'s post-shortlist evaluation path (interview, and later quiz)
+is modeled as a separate, generic `Assessment` entity rather than fields
+bolted onto `Application` or a standalone `Interview`/`Quiz` pair with no
+shared shape:
+
+```
+Application
+  hasOne Assessment
+
+Assessment
+  belongsTo Application
+  hasOne Interview
+  (future) hasOne Quiz
+```
+
+- `Application` owns recruitment lifecycle only (`status`: pending,
+  reviewed, shortlisted, interview_scheduled, accepted, rejected,
+  withdrawn — unchanged by this phase).
+- `Assessment` owns the shared assessment lifecycle: `type` (`interview` |
+  `quiz`), `status`, `result`, `completed_at`.
+- `Interview` owns interview-specific scheduling/outcome detail
+  (`interview_type`, `scheduled_at`, `decision`, `rating`, etc.) and
+  belongs to `Assessment`, not directly to `Application`.
+- An application has at most one assessment today. `quiz` is a valid
+  `assessment.type` value in the schema, but no `quizzes` table, quiz
+  controller, or quiz UI exists yet — schema-ready only.
+- This is a backend-only restructuring: all pre-existing Interview API
+  routes, request/response bodies, and status codes are unchanged (see
+  docs/API.md section 6); `application.status` is unchanged (see
+  docs/BUSINESS_RULES.md section 5).
+
+---
+
 ## Authentication
 
 Authentication will use Laravel Sanctum.

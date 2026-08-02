@@ -94,7 +94,12 @@ class AdminDashboardTest extends TestCase
         $org = $this->organizationWithApproval('approved');
         $opportunity = $this->opportunityFor($org);
         $application = $this->applicationFor($opportunity);
-        $application->interview()->create([
+        $assessment = $application->assessment()->create([
+            'type' => 'interview',
+            'status' => 'scheduled',
+            'result' => null,
+        ]);
+        $assessment->interview()->create([
             'interview_type' => 'phone',
             'scheduled_at' => now()->addDays(2),
         ]);

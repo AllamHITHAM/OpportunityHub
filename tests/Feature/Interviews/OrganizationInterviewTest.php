@@ -3,6 +3,7 @@
 namespace Tests\Feature\Interviews;
 
 use App\Models\Application;
+use App\Models\Interview;
 use App\Models\Opportunity;
 use App\Models\OrganizationProfile;
 use App\Models\StudentProfile;
@@ -20,7 +21,7 @@ class OrganizationInterviewTest extends TestCase
         $org = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($org);
         $application = $this->applicationFor($opportunity, 'shortlisted');
-        $interview = $application->interview()->create($this->validInterviewPayload());
+        $interview = $this->interviewFor($application);
 
         Sanctum::actingAs($org->user);
 
@@ -37,7 +38,7 @@ class OrganizationInterviewTest extends TestCase
         $org = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($org);
         $application = $this->applicationFor($opportunity, 'shortlisted');
-        $interview = $application->interview()->create($this->validInterviewPayload());
+        $interview = $this->interviewFor($application);
 
         Sanctum::actingAs($org->user);
 
@@ -53,7 +54,7 @@ class OrganizationInterviewTest extends TestCase
         $orgA = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($orgA);
         $application = $this->applicationFor($opportunity, 'shortlisted');
-        $interview = $application->interview()->create($this->validInterviewPayload());
+        $interview = $this->interviewFor($application);
 
         $orgB = $this->approvedOrganization();
         Sanctum::actingAs($orgB->user);
@@ -80,11 +81,35 @@ class OrganizationInterviewTest extends TestCase
 
         $response->assertStatus(201)
             ->assertJsonPath('success', true)
-            ->assertJsonPath('data.application_id', $application->id);
+            ->assertJsonPath('data.assessment.application_id', $application->id);
 
-        $this->assertDatabaseHas('interviews', [
+        $this->assertDatabaseHas('assessments', [
             'application_id' => $application->id,
+            'type' => 'interview',
+            'status' => 'scheduled',
         ]);
+        $this->assertDatabaseCount('interviews', 1);
+    }
+
+    public function test_creating_an_interview_also_creates_an_assessment(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->postJson(
+            "/api/organization/applications/{$application->id}/interview",
+            $this->validInterviewPayload()
+        );
+
+        $response->assertStatus(201);
+
+        $application->refresh();
+        $this->assertNotNull($application->assessment);
+        $this->assertSame('interview', $application->assessment->type);
+        $this->assertSame($application->assessment->id, $response->json('data.assessment_id'));
     }
 
     public function test_organization_cannot_create_an_interview_for_another_organizations_application(): void
@@ -106,6 +131,7 @@ class OrganizationInterviewTest extends TestCase
             ->assertJsonPath('message', 'Application not found');
 
         $this->assertDatabaseCount('interviews', 0);
+        $this->assertDatabaseCount('assessments', 0);
     }
 
     public function test_organization_cannot_create_a_second_interview_for_the_same_application(): void
@@ -113,7 +139,7 @@ class OrganizationInterviewTest extends TestCase
         $org = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($org);
         $application = $this->applicationFor($opportunity, 'shortlisted');
-        $application->interview()->create($this->validInterviewPayload());
+        $this->interviewFor($application);
 
         Sanctum::actingAs($org->user);
 
@@ -127,6 +153,7 @@ class OrganizationInterviewTest extends TestCase
             ->assertJsonPath('message', 'An interview already exists for this application');
 
         $this->assertDatabaseCount('interviews', 1);
+        $this->assertDatabaseCount('assessments', 1);
     }
 
     public function test_creating_an_interview_updates_the_application_status_to_interview_scheduled(): void
@@ -148,12 +175,39 @@ class OrganizationInterviewTest extends TestCase
         ]);
     }
 
+    /**
+     * Setting `interview_scheduled` through the generic status endpoint
+     * (rather than through the interview-creation endpoint) is still
+     * possible -- it's a pre-existing, unenforced gap in the status state
+     * machine, not something this phase closes. This test documents that
+     * an application's status alone can never be trusted to imply an
+     * Assessment row actually exists.
+     */
+    public function test_generic_application_status_cannot_imply_an_assessment_exists(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+
+        $this->putJson("/api/organization/applications/{$application->id}/status", [
+            'status' => 'interview_scheduled',
+        ])->assertStatus(200);
+
+        $this->assertDatabaseHas('applications', [
+            'id' => $application->id,
+            'status' => 'interview_scheduled',
+        ]);
+        $this->assertDatabaseCount('assessments', 0);
+    }
+
     public function test_organization_can_update_its_own_interview(): void
     {
         $org = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($org);
         $application = $this->applicationFor($opportunity, 'shortlisted');
-        $interview = $application->interview()->create($this->validInterviewPayload());
+        $interview = $this->interviewFor($application);
 
         Sanctum::actingAs($org->user);
 
@@ -177,7 +231,7 @@ class OrganizationInterviewTest extends TestCase
         $orgA = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($orgA);
         $application = $this->applicationFor($opportunity, 'shortlisted');
-        $interview = $application->interview()->create($this->validInterviewPayload());
+        $interview = $this->interviewFor($application);
 
         $orgB = $this->approvedOrganization();
         Sanctum::actingAs($orgB->user);
@@ -202,7 +256,7 @@ class OrganizationInterviewTest extends TestCase
         $org = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($org);
         $application = $this->applicationFor($opportunity, 'shortlisted');
-        $interview = $application->interview()->create($this->validInterviewPayload());
+        $interview = $this->interviewFor($application);
 
         Sanctum::actingAs($org->user);
 
@@ -222,7 +276,7 @@ class OrganizationInterviewTest extends TestCase
         $org = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($org);
         $application = $this->applicationFor($opportunity, 'shortlisted');
-        $interview = $application->interview()->create($this->validInterviewPayload());
+        $interview = $this->interviewFor($application);
 
         Sanctum::actingAs($org->user);
 
@@ -240,7 +294,7 @@ class OrganizationInterviewTest extends TestCase
         $org = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($org);
         $application = $this->applicationFor($opportunity, 'shortlisted');
-        $interview = $application->interview()->create($this->validInterviewPayload());
+        $interview = $this->interviewFor($application);
 
         $this->assertNull($interview->completed_at);
 
@@ -253,12 +307,66 @@ class OrganizationInterviewTest extends TestCase
         $this->assertNotNull($interview->completed_at);
     }
 
+    public function test_completing_an_interview_updates_the_assessment_status_result_and_completed_at(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+        $interview = $this->interviewFor($application);
+
+        $this->assertNull($interview->assessment->completed_at);
+        $this->assertNull($interview->assessment->result);
+        $this->assertSame('scheduled', $interview->assessment->status);
+
+        Sanctum::actingAs($org->user);
+
+        $this->putJson("/api/organization/interviews/{$interview->id}/complete", [
+            'decision' => 'passed',
+        ])->assertStatus(200);
+
+        $interview->assessment->refresh();
+        $this->assertSame('completed', $interview->assessment->status);
+        $this->assertSame('passed', $interview->assessment->result);
+        $this->assertNotNull($interview->assessment->completed_at);
+    }
+
+    /**
+     * Completing an interview never touches the application's recruitment
+     * status -- the organization always makes the accept/reject call
+     * separately, through the existing status endpoint.
+     */
+    public function test_completing_an_interview_does_not_change_the_application_status(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+        $interview = $this->interviewFor($application);
+
+        // `interviewFor()` creates the Assessment/Interview directly,
+        // bypassing the store() endpoint's `interview_scheduled` side
+        // effect -- set it explicitly so this test reflects the real
+        // post-creation state it's asserting stays unchanged.
+        $application->status = 'interview_scheduled';
+        $application->save();
+
+        Sanctum::actingAs($org->user);
+
+        $this->putJson("/api/organization/interviews/{$interview->id}/complete", [
+            'decision' => 'passed',
+        ])->assertStatus(200);
+
+        $this->assertDatabaseHas('applications', [
+            'id' => $application->id,
+            'status' => 'interview_scheduled',
+        ]);
+    }
+
     public function test_organization_can_delete_its_own_interview(): void
     {
         $org = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($org);
         $application = $this->applicationFor($opportunity, 'shortlisted');
-        $interview = $application->interview()->create($this->validInterviewPayload());
+        $interview = $this->interviewFor($application);
 
         Sanctum::actingAs($org->user);
 
@@ -270,12 +378,69 @@ class OrganizationInterviewTest extends TestCase
         $this->assertDatabaseMissing('interviews', ['id' => $interview->id]);
     }
 
+    public function test_deleting_a_scheduled_interview_removes_the_assessment_and_restores_application_to_shortlisted(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+
+        $this->postJson(
+            "/api/organization/applications/{$application->id}/interview",
+            $this->validInterviewPayload()
+        )->assertStatus(201);
+
+        $this->assertDatabaseHas('applications', [
+            'id' => $application->id,
+            'status' => 'interview_scheduled',
+        ]);
+
+        $interview = Interview::firstOrFail();
+
+        $this->deleteJson("/api/organization/interviews/{$interview->id}")
+            ->assertStatus(200);
+
+        $this->assertDatabaseMissing('interviews', ['id' => $interview->id]);
+        $this->assertDatabaseCount('assessments', 0);
+        $this->assertDatabaseHas('applications', [
+            'id' => $application->id,
+            'status' => 'shortlisted',
+        ]);
+    }
+
+    /**
+     * If the application's status was moved on to something else
+     * independently (e.g. an organization used the generic status
+     * endpoint), deleting the interview must not clobber that decision.
+     */
+    public function test_deleting_an_interview_does_not_touch_an_application_status_other_than_interview_scheduled(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+        $interview = $this->interviewFor($application);
+
+        $application->status = 'accepted';
+        $application->save();
+
+        Sanctum::actingAs($org->user);
+
+        $this->deleteJson("/api/organization/interviews/{$interview->id}")
+            ->assertStatus(200);
+
+        $this->assertDatabaseHas('applications', [
+            'id' => $application->id,
+            'status' => 'accepted',
+        ]);
+    }
+
     public function test_organization_cannot_delete_another_organizations_interview(): void
     {
         $orgA = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($orgA);
         $application = $this->applicationFor($opportunity, 'shortlisted');
-        $interview = $application->interview()->create($this->validInterviewPayload());
+        $interview = $this->interviewFor($application);
 
         $orgB = $this->approvedOrganization();
         Sanctum::actingAs($orgB->user);
@@ -287,6 +452,28 @@ class OrganizationInterviewTest extends TestCase
             ->assertJsonPath('message', 'Interview not found');
 
         $this->assertDatabaseHas('interviews', ['id' => $interview->id]);
+    }
+
+    public function test_a_completed_interview_cannot_be_deleted(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+        $interview = $this->interviewFor($application);
+
+        Sanctum::actingAs($org->user);
+
+        $this->putJson("/api/organization/interviews/{$interview->id}/complete", [])
+            ->assertStatus(200);
+
+        $response = $this->deleteJson("/api/organization/interviews/{$interview->id}");
+
+        $response->assertStatus(409)
+            ->assertJsonPath('success', false)
+            ->assertJsonPath('message', 'Completed interviews cannot be deleted');
+
+        $this->assertDatabaseHas('interviews', ['id' => $interview->id]);
+        $this->assertDatabaseCount('assessments', 1);
     }
 
     public function test_invalid_interview_data_is_rejected(): void
@@ -346,7 +533,7 @@ class OrganizationInterviewTest extends TestCase
         $org = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($org);
         $application = $this->applicationFor($opportunity, 'shortlisted');
-        $interview = $application->interview()->create($this->validInterviewPayload());
+        $interview = $this->interviewFor($application);
 
         Sanctum::actingAs($org->user);
 
@@ -368,7 +555,7 @@ class OrganizationInterviewTest extends TestCase
         $org = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($org);
         $application = $this->applicationFor($opportunity, 'shortlisted');
-        $interview = $application->interview()->create($this->validInterviewPayload());
+        $interview = $this->interviewFor($application);
 
         Sanctum::actingAs($org->user);
 
@@ -443,5 +630,22 @@ class OrganizationInterviewTest extends TestCase
             'interview_type' => 'phone',
             'scheduled_at' => now()->addDays(3)->toDateTimeString(),
         ], $overrides);
+    }
+
+    /**
+     * Creates an Assessment (type=interview) and its Interview directly,
+     * bypassing the HTTP endpoint -- the equivalent of the old
+     * `$application->interview()->create(...)` shortcut, which no longer
+     * works now that `interviews` has no direct `application_id` column.
+     */
+    private function interviewFor(Application $application, array $overrides = []): Interview
+    {
+        $assessment = $application->assessment()->create([
+            'type' => 'interview',
+            'status' => 'scheduled',
+            'result' => null,
+        ]);
+
+        return $assessment->interview()->create($this->validInterviewPayload($overrides));
     }
 }

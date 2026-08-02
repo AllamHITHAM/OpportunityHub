@@ -13,9 +13,9 @@ class InterviewController extends Controller
     {
         $studentId = $request->user()->studentProfile->id;
 
-        $interviews = Interview::whereHas('application', function ($query) use ($studentId) {
+        $interviews = Interview::whereHas('assessment.application', function ($query) use ($studentId) {
             $query->where('student_id', $studentId);
-        })->with('application.opportunity')->get();
+        })->with('assessment.application.opportunity')->get();
 
         return response()->json([
             'success' => true,

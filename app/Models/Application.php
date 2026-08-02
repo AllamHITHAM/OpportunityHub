@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\Relations\HasOneThrough;
 
 class Application extends Model
 {
@@ -30,9 +31,30 @@ class Application extends Model
         return $this->belongsTo(CV::class);
     }
 
-    public function interview(): HasOne
+    public function assessment(): HasOne
     {
-        return $this->hasOne(Interview::class);
+        return $this->hasOne(Assessment::class);
+    }
+
+    /**
+     * Read-only convenience accessor to reach this application's interview
+     * without going through `assessment` explicitly. `interviews` no longer
+     * has an `application_id` column (see the assessment retarget
+     * migration), so this is a genuine "through" relation via `assessments`
+     * rather than a direct FK -- it does not support `create()`/`save()`;
+     * use `assessment()->create([...])` followed by
+     * `$assessment->interview()->create([...])` to create one.
+     */
+    public function interview(): HasOneThrough
+    {
+        return $this->hasOneThrough(
+            Interview::class,
+            Assessment::class,
+            'application_id', // Foreign key on the assessments table.
+            'assessment_id', // Foreign key on the interviews table.
+            'id', // Local key on the applications table.
+            'id', // Local key on the assessments table.
+        );
     }
 
     protected function casts(): array

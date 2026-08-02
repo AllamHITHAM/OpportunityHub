@@ -1,9 +1,9 @@
 <?php
 
-namespace Tests\Feature\Interviews;
+namespace Tests\Feature\Assessments;
 
 use App\Models\Application;
-use App\Models\Interview;
+use App\Models\Assessment;
 use App\Models\Opportunity;
 use App\Models\OrganizationProfile;
 use App\Models\StudentProfile;
@@ -12,53 +12,96 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
 
-class StudentInterviewTest extends TestCase
+class StudentAssessmentTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_student_can_list_only_their_own_interviews(): void
+    public function test_student_can_list_only_their_own_assessments(): void
     {
         $org = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($org);
 
         $student = $this->studentWithProfileAndCv();
         $application = $this->applicationForStudent($opportunity, $student, 'shortlisted');
-        $interview = $this->interviewFor($application);
+        $assessment = $this->assessmentFor($application);
 
         $otherStudent = $this->studentWithProfileAndCv();
         $otherApplication = $this->applicationForStudent($opportunity, $otherStudent, 'shortlisted');
-        $this->interviewFor($otherApplication);
+        $this->assessmentFor($otherApplication);
 
         Sanctum::actingAs($student->user);
 
-        $response = $this->getJson('/api/student/interviews');
+        $response = $this->getJson('/api/student/assessments');
 
         $response->assertStatus(200)
             ->assertJsonPath('success', true)
             ->assertJsonCount(1, 'data')
-            ->assertJsonPath('data.0.id', $interview->id);
+            ->assertJsonPath('data.0.id', $assessment->id)
+            ->assertJsonPath('data.0.application.id', $application->id)
+            ->assertJsonPath('data.0.interview.id', $assessment->interview->id);
     }
 
-    public function test_student_cannot_see_another_students_interviews(): void
+    public function test_student_with_no_assessments_sees_an_empty_list(): void
     {
-        $org = $this->approvedOrganization();
-        $opportunity = $this->opportunityFor($org);
+        $student = $this->studentWithProfileAndCv();
 
-        $owner = $this->studentWithProfileAndCv();
-        $ownerApplication = $this->applicationForStudent($opportunity, $owner, 'shortlisted');
-        $this->interviewFor($ownerApplication);
+        Sanctum::actingAs($student->user);
 
-        $otherStudent = $this->studentWithProfileAndCv();
-        Sanctum::actingAs($otherStudent->user);
-
-        $response = $this->getJson('/api/student/interviews');
+        $response = $this->getJson('/api/student/assessments');
 
         $response->assertStatus(200)
             ->assertJsonPath('success', true)
             ->assertJsonCount(0, 'data');
     }
 
-    public function test_organization_cannot_access_student_interview_routes(): void
+    public function test_student_can_view_their_own_assessment(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+
+        $student = $this->studentWithProfileAndCv();
+        $application = $this->applicationForStudent($opportunity, $student, 'shortlisted');
+        $assessment = $this->assessmentFor($application);
+
+        Sanctum::actingAs($student->user);
+
+        $response = $this->getJson("/api/student/assessments/{$assessment->id}");
+
+        $response->assertStatus(200)
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('data.id', $assessment->id)
+            ->assertJsonPath('data.application.id', $application->id);
+    }
+
+    public function test_student_cannot_view_another_students_assessment(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+
+        $owner = $this->studentWithProfileAndCv();
+        $ownerApplication = $this->applicationForStudent($opportunity, $owner, 'shortlisted');
+        $assessment = $this->assessmentFor($ownerApplication);
+
+        $otherStudent = $this->studentWithProfileAndCv();
+        Sanctum::actingAs($otherStudent->user);
+
+        $response = $this->getJson("/api/student/assessments/{$assessment->id}");
+
+        $response->assertStatus(404)
+            ->assertJsonPath('success', false)
+            ->assertJsonPath('message', 'Assessment not found');
+    }
+
+    public function test_guest_cannot_view_student_assessments(): void
+    {
+        $response = $this->getJson('/api/student/assessments');
+
+        $response->assertStatus(401)
+            ->assertJsonPath('success', false)
+            ->assertJsonPath('message', 'Unauthenticated');
+    }
+
+    public function test_organization_role_cannot_access_student_assessment_routes(): void
     {
         $organizationUser = User::factory()->create([
             'role' => 'organization',
@@ -67,29 +110,11 @@ class StudentInterviewTest extends TestCase
 
         Sanctum::actingAs($organizationUser);
 
-        $response = $this->getJson('/api/student/interviews');
+        $response = $this->getJson('/api/student/assessments');
 
         $response->assertStatus(403)
             ->assertJsonPath('success', false)
             ->assertJsonPath('message', 'This action is unauthorized for your account type');
-    }
-
-    public function test_student_interview_response_includes_application_and_opportunity_details(): void
-    {
-        $org = $this->approvedOrganization();
-        $opportunity = $this->opportunityFor($org, ['title' => 'Backend Developer']);
-
-        $student = $this->studentWithProfileAndCv();
-        $application = $this->applicationForStudent($opportunity, $student, 'shortlisted');
-        $this->interviewFor($application);
-
-        Sanctum::actingAs($student->user);
-
-        $response = $this->getJson('/api/student/interviews');
-
-        $response->assertStatus(200)
-            ->assertJsonPath('data.0.assessment.application.id', $application->id)
-            ->assertJsonPath('data.0.assessment.application.opportunity.title', 'Backend Developer');
     }
 
     private function approvedOrganization(): object
@@ -154,21 +179,7 @@ class StudentInterviewTest extends TestCase
         return $application;
     }
 
-    private function validInterviewPayload(array $overrides = []): array
-    {
-        return array_merge([
-            'interview_type' => 'phone',
-            'scheduled_at' => now()->addDays(3)->toDateTimeString(),
-        ], $overrides);
-    }
-
-    /**
-     * Creates an Assessment (type=interview) and its Interview directly,
-     * bypassing the HTTP endpoint -- the equivalent of the old
-     * `$application->interview()->create(...)` shortcut, which no longer
-     * works now that `interviews` has no direct `application_id` column.
-     */
-    private function interviewFor(Application $application, array $overrides = []): Interview
+    private function assessmentFor(Application $application): Assessment
     {
         $assessment = $application->assessment()->create([
             'type' => 'interview',
@@ -176,6 +187,11 @@ class StudentInterviewTest extends TestCase
             'result' => null,
         ]);
 
-        return $assessment->interview()->create($this->validInterviewPayload($overrides));
+        $assessment->interview()->create([
+            'interview_type' => 'phone',
+            'scheduled_at' => now()->addDays(3),
+        ]);
+
+        return $assessment->fresh('interview');
     }
 }
