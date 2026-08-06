@@ -95,6 +95,7 @@ Route::middleware(['auth:sanctum', 'active', 'role:organization'])->group(functi
     Route::put('/organization/interviews/{interview}/complete', [OrganizationInterviewController::class, 'complete']);
     Route::delete('/organization/interviews/{interview}', [OrganizationInterviewController::class, 'destroy']);
 
+    Route::post('/organization/applications/{application}/assessments', [OrganizationAssessmentController::class, 'store']);
     Route::get('/organization/applications/{application}/assessment', [OrganizationAssessmentController::class, 'showForApplication']);
     Route::get('/organization/assessments/{assessment}', [OrganizationAssessmentController::class, 'show']);
 

@@ -53,6 +53,7 @@
 - A rejected application cannot be accepted unless admin/organization updates it manually — this is a stated rule, not one enforced by the API: the status endpoint currently accepts any of `reviewed, shortlisted, interview_scheduled, accepted, rejected` in any order, with no transition state machine.
 - A withdrawn application is controlled by the student.
 - **`application.status` owns recruitment progress only** (Phase 4A-1 decision). It does not, and must not, describe assessment-path or assessment-outcome detail — that belongs to `assessment.status`/`assessment.result` (see section 7). `interview_scheduled` remains a valid `application.status` value for backward compatibility with existing records, existing Interview APIs, and existing tests; it is not removed or replaced by this phase, and no new generic "in progress" status value has been added — this phase intentionally leaves the completed application workflow unchanged.
+- **`interview_scheduled` is explicitly a temporary backward-compatibility status, not the long-term assessment-state design** — Phase 4A-2 continues writing it (for both the legacy and generic interview-creation endpoints) rather than introducing a generic status such as `in_assessment`, deliberately deferring that redesign to a later phase.
 
 ## 6. Interview Rules
 
@@ -65,13 +66,15 @@
 
 ## 7. Assessment Rules
 
-Added in Phase 4A-1 as the shared foundation for future Interview/Quiz assessment paths.
+Added in Phase 4A-1 as the shared foundation for the Interview/Quiz assessment paths; Phase 4A-2 adds the ability to create one generically.
 
-- An assessment belongs to one application; an application can have **at most one assessment**.
-- An assessment has a `type`: `interview` or `quiz`. **Only `interview` is implemented in this phase** — the `quiz` value is schema-ready only; there is no quiz table, no quiz creation path, and no quiz UI.
+- An assessment belongs to one application; an application can have **at most one assessment**, enforced by a database unique constraint (`assessments.application_id`).
+- An assessment has a `type`: `interview` or `quiz`. **Only `interview` can actually be created.** `quiz` is a recognized, syntactically valid request value — requesting `POST /api/organization/applications/{application}/assessments` with `type=quiz` returns an explicit `422` (`"Quiz assessments are not available yet."`) and writes nothing to the database. There is no quiz table, no quiz creation path, and no quiz UI.
 - An assessment has a `status` (`pending, scheduled, in_progress, completed, declined, cancelled`) and a `result` (`passed, failed, waiting`, or no result yet — represented as `null`, not the string `pending`).
-- Today, an assessment (and its interview) is only ever created as a side effect of the existing "schedule interview" endpoint — there is no standalone "create assessment" or "organization chooses assessment type" endpoint yet. Only read endpoints exist for assessments (`GET /api/organization/applications/{application}/assessment`, `GET /api/organization/assessments/{assessment}`, `GET /api/student/assessments`, `GET /api/student/assessments/{assessment}`) — see docs/API.md section 7.
+- An organization can create an interview assessment two ways — the original per-type endpoint (`POST /api/organization/applications/{application}/interview`) and, as of Phase 4A-2, the generic endpoint (`POST /api/organization/applications/{application}/assessments` with `type=interview`). **Both call the same underlying workflow** (`App\Services\AssessmentService`) and are subject to identical rules: allowed source application status, one-assessment-per-application, and the same Interview field validation — see docs/API.md sections 6–7 and docs/ARCHITECTURE.md.
+- Only `shortlisted` and `interview_scheduled` applications may have an assessment created for them; `pending`, `reviewed`, `accepted`, `rejected`, and `withdrawn` are blocked with a `422`. No new application status (e.g. `in_assessment`, `quiz_assigned`) has been introduced for this — see section 5.
 - An assessment's own `status`/`result` never changes `application.status`; only the organization's explicit status-update action does that.
+- Read endpoints remain: `GET /api/organization/applications/{application}/assessment`, `GET /api/organization/assessments/{assessment}`, `GET /api/student/assessments`, `GET /api/student/assessments/{assessment}` — see docs/API.md section 7.
 
 ## 8. Notification Rules
 

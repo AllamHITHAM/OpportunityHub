@@ -134,6 +134,55 @@ Assessment
 
 ---
 
+## Assessment Creation Workflow (Phase 4A-2)
+
+Adds `POST /api/organization/applications/{application}/assessments` (the
+"organization chooses an assessment type" entry point) alongside the
+existing legacy Interview creation route, without duplicating any of the
+creation logic between them:
+
+```
+InterviewController::store()  \
+                                > both call AssessmentService::createInterviewAssessment()
+AssessmentController::store() /
+```
+
+- **`App\Services\AssessmentService`** is the single shared write layer,
+  following this codebase's existing controller+service convention (see
+  `MatchingService` / `ApplicationAnalysisController`). It owns:
+  the allowed-source-status check (`shortlisted`/`interview_scheduled`),
+  the duplicate-assessment pre-check, the one database transaction,
+  `Assessment` + `Interview` creation, and the
+  `application.status = interview_scheduled` / `reviewed_at = now()` side
+  effect. It does not perform HTTP response construction, does not return
+  a `JsonResponse`, and does not perform organization-ownership
+  authorization — those stay in each controller, exactly like every other
+  controller in this codebase (no Policy classes are used here).
+- **No duplicated transaction.** Both `InterviewController::store()` and
+  `AssessmentController::store()` call the service directly (constructor
+  injection) and each wraps the result in its own response shape/message —
+  there is no HTTP redirect and no controller calling another controller.
+- **Domain exceptions**, not raw `QueryException`, cross the
+  service→controller boundary for the two failure cases each controller
+  must translate into its own wording:
+  `App\Exceptions\InvalidAssessmentSourceStatusException` and
+  `App\Exceptions\AssessmentAlreadyExistsException`. A real
+  `assessments.application_id` unique-constraint violation (the final
+  concurrency authority, for the narrow race the pre-check can't close) is
+  translated into the same `AssessmentAlreadyExistsException` — but only
+  after confirming the violation is actually that specific constraint, so
+  an unrelated integrity failure is never masked as "duplicate".
+- **One shared validation-rule source.** Interview field rules
+  (`interview_type`, `scheduled_at`, `meeting_link`, `location`, etc.) live
+  in exactly one place —
+  `App\Http\Requests\Organization\Concerns\InteractsWithInterviewRules`,
+  called with an empty prefix by the legacy `StoreInterviewRequest` and
+  with an `interview.` prefix by the generic `StoreAssessmentRequest` (per
+  its nested request contract, see docs/API.md section 7) — never
+  hand-copied between the two request classes.
+
+---
+
 ## Authentication
 
 Authentication will use Laravel Sanctum.

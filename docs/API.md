@@ -260,6 +260,8 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 **As of Phase 4A-1, an Interview is a detail record hanging off a generic `Assessment` (see section 7) rather than being attached to `Application` directly.** Every route, request body, status code, and business rule documented below is unchanged from before Phase 4A-1 — this phase is a backend restructuring only.
 
+**This route remains fully supported after Phase 4A-2.** `POST .../applications/{application}/interview` internally calls the exact same `App\Services\AssessmentService::createInterviewAssessment()` method the new generic endpoint (section 7) calls — there is no HTTP redirect, no internal self-request, and no second database transaction; the controller only translates the service's outcome into this route's historical response shape/messages, which are unchanged.
+
 **Response shape is fully backward compatible.** Every endpoint below still returns the pre-Phase-4A-1 top-level `data.application` object exactly as before (an `Interview` model's `application` is now a computed/appended attribute resolved through `assessment`, not a real column — see `app/Models/Interview.php`), and **additively** returns a new `data.assessment` object alongside it:
 
 ```json
@@ -325,9 +327,34 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 ## 7. Assessments
 
-Added in Phase 4A-1 as the generic entity that will eventually let an organization choose **Interview or Quiz** (or no formal assessment) once a shortlisted application. **This phase adds read-only Assessment APIs only** — creating/updating an assessment still only happens implicitly, through the Interview endpoints in section 6. There is no generic "create assessment" or "choose assessment type" endpoint yet, no Quiz support, and no student accept/decline endpoint yet — those are future phases.
+Added in Phase 4A-1 as the generic entity that lets an organization choose **Interview or Quiz** (or no formal assessment) once an application is shortlisted. **As of Phase 4A-2, `type=interview` can be created through the generic endpoint below**, using the exact same shared workflow (`App\Services\AssessmentService`) as the legacy Interview endpoint (section 6) — neither duplicates the other's transaction, status, duplicate, or validation logic. `type=quiz` is a recognized request value that returns an explicit, clean error (see below); there is still no Quiz table, controller, or UI, and no student accept/decline endpoint yet — those remain future phases.
 
-An application has at most one `Assessment`. An `Assessment` has `type` (`interview` or `quiz` — only `interview` is ever populated today), `status` (`pending, scheduled, in_progress, completed, declined, cancelled`), and `result` (`null`, `pending`, `passed`, `failed`, or `waiting` — a decision not yet recorded is represented as `null`, not the string `"pending"`).
+An application has at most one `Assessment`. An `Assessment` has `type` (`interview` or `quiz` — only `interview` can ever be persisted today), `status` (`pending, scheduled, in_progress, completed, declined, cancelled`), and `result` (`null`, `pending`, `passed`, `failed`, or `waiting` — a decision not yet recorded is represented as `null`, not the string `"pending"`).
+
+### POST /api/organization/applications/{application}/assessments
+- Middleware: `auth:sanctum, active, role:organization`
+- Body (nested, type-specific):
+  ```json
+  {
+    "type": "interview",
+    "interview": {
+      "interview_type": "online",
+      "scheduled_at": "2026-08-10 10:00:00",
+      "duration_minutes": 60,
+      "meeting_link": "https://meet.example.com/...",
+      "location": null,
+      "interviewer_name": "Jane Recruiter",
+      "interviewer_email": "jane@example.com",
+      "notes": "..."
+    }
+  }
+  ```
+  `type` is required (`in:interview,quiz`). `interview` is required when `type=interview`; its fields are validated by the exact same shared rule source as the legacy endpoint's body (`interview_type`, `scheduled_at` required; `meeting_link` required when `interview_type=online`; `location` required when `interview_type=onsite`; `duration_minutes`/`interviewer_name`/`interviewer_email`/`notes` optional) — see `App\Http\Requests\Organization\Concerns\InteractsWithInterviewRules`.
+- Preconditions: application must be `shortlisted` or `interview_scheduled` (422 otherwise); one assessment per application max (409 if one already exists) — identical rules to the legacy endpoint, enforced by the same service.
+- **`type=quiz`**: returns 422 immediately, before any database write — `{"success": false, "message": "Quiz assessments are not available yet.", "data": null}`. This is a deliberate, explicit business rejection, not a generic validation failure — `type=quiz` is syntactically valid.
+- **Unknown `type`** (anything other than `interview`/`quiz`): standard Laravel validation failure (422, `{message, errors}` shape).
+- Success (`type=interview`): 201 — creates an `Assessment` (`type=interview`, `status=scheduled`, `result=null`) and its `Interview` in one transaction, and sets the application's `status = interview_scheduled` and `reviewed_at = now()` (same side effect as the legacy endpoint — see docs/BUSINESS_RULES.md section 5 on this status being a temporary compatibility value, not the long-term design). Response `data` is the `Assessment`, with `application` and `interview` nested — **not** `data.interview.application` (deliberately hidden at this response's call site via `makeHidden('application')`, since it would just duplicate `data.application` one level down; the legacy Interview endpoints are unaffected and keep exposing it).
+- Errors: 401, 403, 404 (`"Application not found"`, application not owned by this organization), 409 (`"An assessment already exists for this application"`), 422 (invalid source status: `"An assessment can only be created for shortlisted applications"`; `type=quiz`; validation failures).
 
 ### GET /api/organization/applications/{application}/assessment
 - Middleware: `auth:sanctum, active, role:organization`

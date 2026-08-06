@@ -2,19 +2,25 @@
 
 namespace App\Http\Controllers\Organization;
 
+use App\Exceptions\AssessmentAlreadyExistsException;
+use App\Exceptions\InvalidAssessmentSourceStatusException;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Organization\CompleteInterviewRequest;
 use App\Http\Requests\Organization\StoreInterviewRequest;
 use App\Http\Requests\Organization\UpdateInterviewRequest;
 use App\Models\Application;
 use App\Models\Interview;
-use Illuminate\Database\QueryException;
+use App\Services\AssessmentService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class InterviewController extends Controller
 {
+    public function __construct(private readonly AssessmentService $assessments)
+    {
+    }
+
     public function store(StoreInterviewRequest $request, Application $application): JsonResponse
     {
         if ($application->opportunity->organization_id !== $request->user()->organizationProfile->id) {
@@ -25,39 +31,18 @@ class InterviewController extends Controller
             ], 404);
         }
 
-        if (! in_array($application->status, ['shortlisted', 'interview_scheduled'], true)) {
+        try {
+            $assessment = $this->assessments->createInterviewAssessment(
+                $application,
+                $request->validated(),
+            );
+        } catch (InvalidAssessmentSourceStatusException) {
             return response()->json([
                 'success' => false,
                 'message' => 'An interview can only be scheduled for shortlisted applications',
                 'data' => null,
             ], 422);
-        }
-
-        if ($application->assessment()->exists()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'An interview already exists for this application',
-                'data' => null,
-            ], 409);
-        }
-
-        try {
-            $interview = DB::transaction(function () use ($request, $application) {
-                $assessment = $application->assessment()->create([
-                    'type' => 'interview',
-                    'status' => 'scheduled',
-                    'result' => null,
-                ]);
-
-                $interview = $assessment->interview()->create($request->validated());
-
-                $application->status = 'interview_scheduled';
-                $application->reviewed_at = now();
-                $application->save();
-
-                return $interview;
-            });
-        } catch (QueryException $e) {
+        } catch (AssessmentAlreadyExistsException) {
             return response()->json([
                 'success' => false,
                 'message' => 'An interview already exists for this application',
@@ -68,7 +53,7 @@ class InterviewController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Interview scheduled successfully',
-            'data' => $interview->load('assessment.application'),
+            'data' => $assessment->interview->load('assessment.application'),
         ], 201);
     }
 
