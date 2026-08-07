@@ -32,6 +32,8 @@ class OrganizationAssessmentTest extends TestCase
             ->assertJsonPath('data.id', $assessment->id)
             ->assertJsonPath('data.type', 'interview')
             ->assertJsonPath('data.application.id', $application->id)
+            ->assertJsonPath('data.application.cv.id', $application->cv_id)
+            ->assertJsonPath('data.application.cv.file_path', 'cvs/my-cv.pdf')
             ->assertJsonPath('data.interview.id', $assessment->interview->id);
     }
 
@@ -82,6 +84,8 @@ class OrganizationAssessmentTest extends TestCase
             ->assertJsonPath('success', true)
             ->assertJsonPath('data.id', $assessment->id)
             ->assertJsonPath('data.application.id', $application->id)
+            ->assertJsonPath('data.application.cv.id', $application->cv_id)
+            ->assertJsonPath('data.application.cv.file_path', 'cvs/my-cv.pdf')
             ->assertJsonPath('data.interview.id', $assessment->interview->id);
     }
 

@@ -62,7 +62,19 @@ class AssessmentController extends Controller
             ], 409);
         }
 
-        $assessment->load(['application', 'interview']);
+        // The same fully-populated Application shape every other
+        // organization-facing endpoint returns (see ApplicationController) --
+        // `cv` is required by the Flutter client's ApplicationModel, and
+        // `opportunity`/`studentProfile.user` are the rest of that
+        // established contract. Nested dot-notation keeps this eager
+        // loading (no N+1) rather than letting the client's own later
+        // property access lazy-load them one row at a time.
+        $assessment->load([
+            'application.opportunity',
+            'application.studentProfile.user',
+            'application.cv',
+            'interview',
+        ]);
         // Avoid redundant/duplicated data: the Interview's own
         // backward-compatible `application` accessor (see Interview.php)
         // exists for the legacy standalone Interview endpoints, but has no
@@ -92,6 +104,12 @@ class AssessmentController extends Controller
         }
 
         $assessment = $application->assessment()->with('interview')->first();
+        // `$application` here is the route-bound model reused as-is (not a
+        // fresh fetch via `load()`), so its own missing relations need
+        // filling in explicitly -- `loadMissing` skips `opportunity` if the
+        // ownership check above already lazy-loaded it, avoiding a
+        // redundant query.
+        $application->loadMissing(['opportunity', 'studentProfile.user', 'cv']);
         $assessment?->setRelation('application', $application);
 
         return response()->json([
@@ -108,7 +126,11 @@ class AssessmentController extends Controller
      */
     public function show(Assessment $assessment, Request $request): JsonResponse
     {
-        $assessment->loadMissing('application.opportunity');
+        $assessment->loadMissing([
+            'application.opportunity',
+            'application.studentProfile.user',
+            'application.cv',
+        ]);
 
         if ($assessment->application->opportunity->organization_id !== $request->user()->organizationProfile->id) {
             return response()->json([

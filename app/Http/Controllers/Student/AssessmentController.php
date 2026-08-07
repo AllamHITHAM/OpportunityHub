@@ -15,7 +15,17 @@ class AssessmentController extends Controller
 
         $assessments = Assessment::whereHas('application', function ($query) use ($studentId) {
             $query->where('student_id', $studentId);
-        })->with(['application', 'interview'])->get();
+        })->with([
+            // The same fully-populated Application shape every other
+            // student-facing endpoint returns (see ApplicationController) --
+            // `cv` is required by the Flutter client's ApplicationModel.
+            // `studentProfile.user` is deliberately not included here: it's
+            // the student's own identity, never nested back to them on
+            // student-facing responses (see ApplicationModel's docs).
+            'application.opportunity',
+            'application.cv',
+            'interview',
+        ])->get();
 
         return response()->json([
             'success' => true,
@@ -39,7 +49,7 @@ class AssessmentController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Assessment retrieved successfully',
-            'data' => $assessment->load(['application', 'interview']),
+            'data' => $assessment->load(['application.opportunity', 'application.cv', 'interview']),
         ]);
     }
 }

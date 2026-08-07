@@ -40,6 +40,8 @@ class StoreAssessmentTest extends TestCase
             ->assertJsonPath('data.status', 'scheduled')
             ->assertJsonPath('data.result', null)
             ->assertJsonPath('data.application.id', $application->id)
+            ->assertJsonPath('data.application.cv.id', $application->cv_id)
+            ->assertJsonPath('data.application.cv.file_path', 'cvs/my-cv.pdf')
             ->assertJsonPath('data.interview.interview_type', 'online')
             ->assertJsonPath('data.interview.meeting_link', 'https://meet.example.com/room');
 

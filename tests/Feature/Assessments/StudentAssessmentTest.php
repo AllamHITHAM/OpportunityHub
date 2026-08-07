@@ -38,6 +38,8 @@ class StudentAssessmentTest extends TestCase
             ->assertJsonCount(1, 'data')
             ->assertJsonPath('data.0.id', $assessment->id)
             ->assertJsonPath('data.0.application.id', $application->id)
+            ->assertJsonPath('data.0.application.cv.id', $application->cv_id)
+            ->assertJsonPath('data.0.application.cv.file_path', 'cvs/my-cv.pdf')
             ->assertJsonPath('data.0.interview.id', $assessment->interview->id);
     }
 
@@ -70,7 +72,9 @@ class StudentAssessmentTest extends TestCase
         $response->assertStatus(200)
             ->assertJsonPath('success', true)
             ->assertJsonPath('data.id', $assessment->id)
-            ->assertJsonPath('data.application.id', $application->id);
+            ->assertJsonPath('data.application.id', $application->id)
+            ->assertJsonPath('data.application.cv.id', $application->cv_id)
+            ->assertJsonPath('data.application.cv.file_path', 'cvs/my-cv.pdf');
     }
 
     public function test_student_cannot_view_another_students_assessment(): void
