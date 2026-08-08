@@ -49,6 +49,42 @@ class OrganizationInterviewTest extends TestCase
             ->assertJsonPath('data.id', $interview->id);
     }
 
+    /**
+     * Regression guard for the Phase 6A-Backend student privacy hotfix:
+     * hiding internal Interview fields from Student responses must not
+     * affect the Organization's own contract, which still needs them.
+     */
+    public function test_organization_interview_response_still_includes_internal_fields(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+        $interview = $this->interviewFor($application, [
+            'interviewer_email' => 'jane@hiring.example',
+        ]);
+        $interview->rating = 4;
+        $interview->company_feedback = 'Strong technical answers.';
+        $interview->save();
+
+        Sanctum::actingAs($org->user);
+
+        $showResponse = $this->getJson("/api/organization/interviews/{$interview->id}");
+
+        $showResponse->assertStatus(200)
+            ->assertJsonPath('data.interviewer_email', 'jane@hiring.example')
+            ->assertJsonPath('data.rating', 4)
+            ->assertJsonPath('data.company_feedback', 'Strong technical answers.')
+            ->assertJsonPath('data.decision', 'pending');
+
+        $indexResponse = $this->getJson('/api/organization/interviews');
+
+        $indexResponse->assertStatus(200)
+            ->assertJsonPath('data.0.interviewer_email', 'jane@hiring.example')
+            ->assertJsonPath('data.0.rating', 4)
+            ->assertJsonPath('data.0.company_feedback', 'Strong technical answers.')
+            ->assertJsonPath('data.0.decision', 'pending');
+    }
+
     public function test_organization_cannot_view_an_interview_belonging_to_another_organization(): void
     {
         $orgA = $this->approvedOrganization();

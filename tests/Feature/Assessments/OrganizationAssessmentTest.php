@@ -52,6 +52,42 @@ class OrganizationAssessmentTest extends TestCase
             ->assertJsonPath('data', null);
     }
 
+    /**
+     * Regression guard for the Phase 6A-Backend student privacy hotfix:
+     * hiding internal Interview fields from Student responses must not
+     * affect the Organization's own contract, which still needs them.
+     */
+    public function test_organization_assessment_response_still_includes_internal_interview_fields(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+        $assessment = $this->assessmentFor($application);
+
+        $assessment->interview->interviewer_email = 'jane@hiring.example';
+        $assessment->interview->rating = 4;
+        $assessment->interview->company_feedback = 'Strong technical answers.';
+        $assessment->interview->save();
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->getJson("/api/organization/applications/{$application->id}/assessment");
+
+        $response->assertStatus(200)
+            ->assertJsonPath('data.interview.interviewer_email', 'jane@hiring.example')
+            ->assertJsonPath('data.interview.rating', 4)
+            ->assertJsonPath('data.interview.company_feedback', 'Strong technical answers.')
+            ->assertJsonPath('data.interview.decision', 'pending');
+
+        $showResponse = $this->getJson("/api/organization/assessments/{$assessment->id}");
+
+        $showResponse->assertStatus(200)
+            ->assertJsonPath('data.interview.interviewer_email', 'jane@hiring.example')
+            ->assertJsonPath('data.interview.rating', 4)
+            ->assertJsonPath('data.interview.company_feedback', 'Strong technical answers.')
+            ->assertJsonPath('data.interview.decision', 'pending');
+    }
+
     public function test_organization_cannot_see_the_assessment_for_another_organizations_application(): void
     {
         $orgA = $this->approvedOrganization();

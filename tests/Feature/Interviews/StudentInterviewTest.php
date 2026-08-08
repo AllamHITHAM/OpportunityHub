@@ -58,6 +58,72 @@ class StudentInterviewTest extends TestCase
             ->assertJsonCount(0, 'data');
     }
 
+    public function test_student_interview_index_hides_internal_interview_fields(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+
+        $student = $this->studentWithProfileAndCv();
+        $application = $this->applicationForStudent($opportunity, $student, 'shortlisted');
+        $interview = $this->interviewFor($application, [
+            'interview_type' => 'onsite',
+            'location' => 'HQ, Room 4',
+            'interviewer_name' => 'Jane Recruiter',
+            'interviewer_email' => 'jane@hiring.example',
+        ]);
+        $interview->rating = 4;
+        $interview->company_feedback = 'Strong technical answers.';
+        $interview->save();
+
+        Sanctum::actingAs($student->user);
+
+        $response = $this->getJson('/api/student/interviews');
+
+        $response->assertStatus(200);
+        $data = $response->json('data.0');
+
+        $this->assertArrayNotHasKey('interviewer_email', $data);
+        $this->assertArrayNotHasKey('company_feedback', $data);
+        $this->assertArrayNotHasKey('rating', $data);
+        $this->assertArrayNotHasKey('decision', $data);
+
+        // Safe scheduling fields the student needs to attend/understand the
+        // interview are untouched.
+        $this->assertSame('onsite', $data['interview_type']);
+        $this->assertSame('HQ, Room 4', $data['location']);
+        $this->assertSame('Jane Recruiter', $data['interviewer_name']);
+        $this->assertSame('scheduled', $data['status']);
+    }
+
+    /**
+     * Even once a real decision has been recorded (not just the DB default
+     * `pending`), the raw `interview.decision` column must stay hidden from
+     * students. `assessment.result` (nested via `data[].assessment`) is the
+     * student-facing outcome instead.
+     */
+    public function test_student_never_sees_raw_interview_decision_even_once_recorded(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+
+        $student = $this->studentWithProfileAndCv();
+        $application = $this->applicationForStudent($opportunity, $student, 'shortlisted');
+        $interview = $this->interviewFor($application);
+        $interview->decision = 'passed';
+        $interview->save();
+        $interview->assessment->status = 'completed';
+        $interview->assessment->result = 'passed';
+        $interview->assessment->save();
+
+        Sanctum::actingAs($student->user);
+
+        $response = $this->getJson('/api/student/interviews');
+
+        $response->assertStatus(200)
+            ->assertJsonPath('data.0.assessment.result', 'passed');
+        $this->assertArrayNotHasKey('decision', $response->json('data.0'));
+    }
+
     public function test_organization_cannot_access_student_interview_routes(): void
     {
         $organizationUser = User::factory()->create([

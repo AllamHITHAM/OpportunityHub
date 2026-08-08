@@ -321,7 +321,7 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 - Errors: 401, 403, 404, 409 ("Completed interviews cannot be deleted")
 
 ### GET /api/student/interviews
-- See section 2. Response is in the same shape as above — `data[].application.opportunity` (legacy path, unchanged) and, additively, `data[].assessment.application.opportunity`.
+- See section 2. Response is in the same shape as above — `data[].application.opportunity` (legacy path, unchanged) and, additively, `data[].assessment.application.opportunity` — **except** each Interview object omits `interviewer_email`, `company_feedback`, `rating`, and `decision` (organization-internal fields; unaffected on the Organization endpoints above). See "Student-visible Interview fields" note under section 7.
 
 ---
 
@@ -368,13 +368,15 @@ An application has at most one `Assessment`. An `Assessment` has `type` (`interv
 
 ### GET /api/student/assessments
 - Middleware: `auth:sanctum, active, role:student`
-- Success: 200 — every assessment belonging to the authenticated student's own applications, each with `application` and `interview` nested
+- Success: 200 — every assessment belonging to the authenticated student's own applications, each with `application` and `interview` nested. The nested `interview` is filtered — see "Student-visible Interview fields" below.
 - Errors: 401, 403
 
 ### GET /api/student/assessments/{assessment}
 - Same middleware
-- Success: 200
+- Success: 200 — same filtered `interview` shape as the index above.
 - Errors: 401, 403, 404 (assessment does not belong to this student)
+
+**Student-visible Interview fields**: `GET /api/student/assessments`, `GET /api/student/assessments/{assessment}`, and `GET /api/student/interviews` (section 6) all return `Interview` with `interviewer_email`, `company_feedback`, `rating`, and `decision` omitted — these are organization-internal (post-interview evaluation data, and a staff member's email), applied per-response via `App\Http\Controllers\Student\Concerns\HidesInternalInterviewFields`, not a model-level `$hidden`. The Organization-facing Interview/Assessment endpoints above are unaffected and continue to return every field. A student's own outcome is `assessment.result` (`null` until a real decision is recorded), not `interview.decision`.
 
 ---
 

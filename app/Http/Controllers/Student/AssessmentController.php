@@ -3,12 +3,15 @@
 namespace App\Http\Controllers\Student;
 
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Student\Concerns\HidesInternalInterviewFields;
 use App\Models\Assessment;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 class AssessmentController extends Controller
 {
+    use HidesInternalInterviewFields;
+
     public function index(Request $request): JsonResponse
     {
         $studentId = $request->user()->studentProfile->id;
@@ -26,6 +29,8 @@ class AssessmentController extends Controller
             'application.cv',
             'interview',
         ])->get();
+
+        $assessments->each(fn (Assessment $assessment) => $this->hideInternalInterviewFields($assessment->interview));
 
         return response()->json([
             'success' => true,
@@ -46,10 +51,13 @@ class AssessmentController extends Controller
             ], 404);
         }
 
+        $assessment->load(['application.opportunity', 'application.cv', 'interview']);
+        $this->hideInternalInterviewFields($assessment->interview);
+
         return response()->json([
             'success' => true,
             'message' => 'Assessment retrieved successfully',
-            'data' => $assessment->load(['application.opportunity', 'application.cv', 'interview']),
+            'data' => $assessment,
         ]);
     }
 }
