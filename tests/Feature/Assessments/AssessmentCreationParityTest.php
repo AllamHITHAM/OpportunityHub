@@ -56,7 +56,7 @@ class AssessmentCreationParityTest extends TestCase
         $applicationB->refresh();
 
         $this->assertSame($applicationA->status, $applicationB->status);
-        $this->assertSame('interview_scheduled', $applicationA->status);
+        $this->assertSame('in_assessment', $applicationA->status);
         $this->assertNotNull($applicationA->reviewed_at);
         $this->assertNotNull($applicationB->reviewed_at);
 

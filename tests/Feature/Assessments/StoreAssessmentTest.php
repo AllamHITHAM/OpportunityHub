@@ -59,7 +59,7 @@ class StoreAssessmentTest extends TestCase
         $this->assertDatabaseCount('interviews', 1);
     }
 
-    public function test_creating_an_assessment_updates_application_status_to_interview_scheduled(): void
+    public function test_creating_an_assessment_updates_application_status_to_in_assessment(): void
     {
         $org = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($org);
@@ -73,6 +73,10 @@ class StoreAssessmentTest extends TestCase
         )->assertStatus(201);
 
         $this->assertDatabaseHas('applications', [
+            'id' => $application->id,
+            'status' => 'in_assessment',
+        ]);
+        $this->assertDatabaseMissing('applications', [
             'id' => $application->id,
             'status' => 'interview_scheduled',
         ]);
@@ -221,6 +225,12 @@ class StoreAssessmentTest extends TestCase
             'accepted' => ['accepted'],
             'rejected' => ['rejected'],
             'withdrawn' => ['withdrawn'],
+            // An application already at the generic `in_assessment` state
+            // must never accept a second assessment -- source-status
+            // validation blocks it here, and assertNoExistingAssessment()
+            // (see test_duplicate_assessment_at_in_assessment_status_is_blocked)
+            // provides the same protection when a real Assessment is present.
+            'in_assessment' => ['in_assessment'],
         ];
     }
 
@@ -251,6 +261,39 @@ class StoreAssessmentTest extends TestCase
         $opportunity = $this->opportunityFor($org);
         $application = $this->applicationFor($opportunity, 'shortlisted');
         $application->assessment()->create(['type' => 'interview', 'status' => 'scheduled', 'result' => null]);
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->postJson(
+            "/api/organization/applications/{$application->id}/assessments",
+            $this->validAssessmentPayload()
+        );
+
+        $response->assertStatus(409)
+            ->assertJsonPath('success', false)
+            ->assertJsonPath('message', 'An assessment already exists for this application');
+
+        $this->assertDatabaseCount('assessments', 1);
+        $this->assertDatabaseCount('interviews', 0);
+    }
+
+    /**
+     * The real-world shape of an already-`in_assessment` application: a
+     * genuine Assessment already exists, matching what
+     * AssessmentService::transitionToInAssessment() always produces.
+     * Existing-assessment is checked before source-status (see
+     * AssessmentService::createInterviewAssessment()), so this still
+     * reports as the same "already exists" 409 as any other duplicate --
+     * either way, no second assessment is ever created.
+     */
+    public function test_duplicate_assessment_at_in_assessment_status_is_blocked(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+        $application->assessment()->create(['type' => 'interview', 'status' => 'scheduled', 'result' => null]);
+        $application->status = 'in_assessment';
+        $application->save();
 
         Sanctum::actingAs($org->user);
 

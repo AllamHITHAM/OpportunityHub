@@ -250,7 +250,7 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 ### PUT /api/organization/applications/{application}/status
 - Same middleware
-- Body: `status` (required, in: reviewed, shortlisted, interview_scheduled, accepted, rejected — **not** `pending`/`withdrawn`)
+- Body: `status` (required, in: reviewed, shortlisted, accepted, rejected — **not** `pending`/`withdrawn`). **As of Phase 6B-0, `in_assessment` and `interview_scheduled` are no longer accepted here** — `in_assessment` must only ever be reached through a real Assessment-creation workflow (section 7), and `interview_scheduled` (deprecated legacy value) can no longer be fabricated with no assessment behind it. Either value in the request body now fails standard `in:` validation (422). Existing rows may still legitimately hold `in_assessment` or `interview_scheduled` — this restriction is on input only, never on what's stored or returned (see the response note below).
 - Success: 200 — also sets `reviewed_at = now()` on every successful call, even if re-setting the same status.
 - Errors: 401, 403, 404, 409 ("Cannot change the status of a withdrawn application"), 422
 
@@ -272,7 +272,7 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
   "scheduled_at": "...",
   "status": "scheduled",
   "decision": "pending",
-  "application": { "id": 5, "status": "interview_scheduled", "...": "..." },
+  "application": { "id": 5, "status": "in_assessment", "...": "..." },
   "assessment": {
     "id": 1,
     "application_id": 5,
@@ -289,8 +289,8 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 ### POST /api/organization/applications/{application}/interview
 - Middleware: `auth:sanctum, active, role:organization`
 - Body: `interview_type` (required, in: onsite, online, phone), `scheduled_at` (required, date), `duration_minutes` (nullable, integer, min:1, default 60), `meeting_link` (required if `interview_type=online`), `location` (required if `interview_type=onsite`), `interviewer_name`/`interviewer_email`/`notes` (nullable)
-- Preconditions: application must be `shortlisted` or `interview_scheduled` (422 otherwise); one interview per application max (409 if one already exists) — enforced via the one-`Assessment`-per-`Application` rule (section 7), not directly on `interviews` any more.
-- Success: 201 — in one DB transaction: creates an `Assessment` (`type=interview`, `status=scheduled`), creates the `Interview` under it, and sets the application's `status = interview_scheduled` and `reviewed_at = now()`, exactly as before. Response `data` is the interview in the shape above.
+- Preconditions: application must be `shortlisted` or (legacy) `interview_scheduled` (422 otherwise; `in_assessment` is never an allowed source — see docs/BUSINESS_RULES.md section 5); one interview per application max (409 if one already exists) — enforced via the one-`Assessment`-per-`Application` rule (section 7), not directly on `interviews` any more.
+- Success: 201 — in one DB transaction: creates an `Assessment` (`type=interview`, `status=scheduled`), creates the `Interview` under it, and sets the application's **`status = in_assessment`** (Phase 6B-0 — previously `interview_scheduled`; see docs/BUSINESS_RULES.md section 5) and `reviewed_at = now()`. Response `data` is the interview in the shape above.
 - Errors: 401, 403, 404, 409, 422
 
 ### GET /api/organization/interviews
@@ -317,7 +317,7 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 ### DELETE /api/organization/interviews/{interview}
 - Same middleware
-- Success: 200 — hard delete. Deletes the parent `Assessment` (which cascades to the `Interview` at the database level). **Behavior change from before Phase 4A-1:** if the application's status was `interview_scheduled`, it is now reverted to `shortlisted` in the same operation, so an application is never left at `interview_scheduled` with no assessment behind it. If the application's status is anything else (e.g. an organization already moved it on to `accepted`/`rejected` independently), it is left untouched.
+- Success: 200 — hard delete. Deletes the parent `Assessment` (which cascades to the `Interview` at the database level). If the application's status was `in_assessment` (or, for legacy rows, `interview_scheduled`), it is reverted to `shortlisted` in the same operation, so an application is never left at either of those statuses with no assessment behind it. If the application's status is anything else (e.g. an organization already moved it on to `accepted`/`rejected` independently), it is left untouched.
 - Errors: 401, 403, 404, 409 ("Completed interviews cannot be deleted")
 
 ### GET /api/student/interviews
@@ -350,10 +350,10 @@ An application has at most one `Assessment`. An `Assessment` has `type` (`interv
   }
   ```
   `type` is required (`in:interview,quiz`). `interview` is required when `type=interview`; its fields are validated by the exact same shared rule source as the legacy endpoint's body (`interview_type`, `scheduled_at` required; `meeting_link` required when `interview_type=online`; `location` required when `interview_type=onsite`; `duration_minutes`/`interviewer_name`/`interviewer_email`/`notes` optional) — see `App\Http\Requests\Organization\Concerns\InteractsWithInterviewRules`.
-- Preconditions: application must be `shortlisted` or `interview_scheduled` (422 otherwise); one assessment per application max (409 if one already exists) — identical rules to the legacy endpoint, enforced by the same service.
+- Preconditions: application must be `shortlisted` or (legacy) `interview_scheduled` (422 otherwise; `in_assessment` is never an allowed source, since a real assessment already exists for it by construction); one assessment per application max (409 if one already exists) — identical rules to the legacy endpoint, enforced by the same service.
 - **`type=quiz`**: returns 422 immediately, before any database write — `{"success": false, "message": "Quiz assessments are not available yet.", "data": null}`. This is a deliberate, explicit business rejection, not a generic validation failure — `type=quiz` is syntactically valid.
 - **Unknown `type`** (anything other than `interview`/`quiz`): standard Laravel validation failure (422, `{message, errors}` shape).
-- Success (`type=interview`): 201 — creates an `Assessment` (`type=interview`, `status=scheduled`, `result=null`) and its `Interview` in one transaction, and sets the application's `status = interview_scheduled` and `reviewed_at = now()` (same side effect as the legacy endpoint — see docs/BUSINESS_RULES.md section 5 on this status being a temporary compatibility value, not the long-term design). Response `data` is the `Assessment`, with `application` and `interview` nested — **not** `data.interview.application` (deliberately hidden at this response's call site via `makeHidden('application')`, since it would just duplicate `data.application` one level down; the legacy Interview endpoints are unaffected and keep exposing it).
+- Success (`type=interview`): 201 — creates an `Assessment` (`type=interview`, `status=scheduled`, `result=null`) and its `Interview` in one transaction, and sets the application's **`status = in_assessment`** and `reviewed_at = now()` (same side effect as the legacy endpoint — see docs/BUSINESS_RULES.md section 5 for the full `in_assessment`/`interview_scheduled` write-path history). Response `data` is the `Assessment`, with `application` and `interview` nested — **not** `data.interview.application` (deliberately hidden at this response's call site via `makeHidden('application')`, since it would just duplicate `data.application` one level down; the legacy Interview endpoints are unaffected and keep exposing it).
 - Errors: 401, 403, 404 (`"Application not found"`, application not owned by this organization), 409 (`"An assessment already exists for this application"`), 422 (invalid source status: `"An assessment can only be created for shortlisted applications"`; `type=quiz`; validation failures).
 
 ### GET /api/organization/applications/{application}/assessment

@@ -10,6 +10,7 @@ use App\Models\StudentProfile;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Sanctum\Sanctum;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class OrganizationInterviewTest extends TestCase
@@ -192,7 +193,7 @@ class OrganizationInterviewTest extends TestCase
         $this->assertDatabaseCount('assessments', 1);
     }
 
-    public function test_creating_an_interview_updates_the_application_status_to_interview_scheduled(): void
+    public function test_creating_an_interview_updates_the_application_status_to_in_assessment(): void
     {
         $org = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($org);
@@ -207,35 +208,12 @@ class OrganizationInterviewTest extends TestCase
 
         $this->assertDatabaseHas('applications', [
             'id' => $application->id,
-            'status' => 'interview_scheduled',
+            'status' => 'in_assessment',
         ]);
-    }
-
-    /**
-     * Setting `interview_scheduled` through the generic status endpoint
-     * (rather than through the interview-creation endpoint) is still
-     * possible -- it's a pre-existing, unenforced gap in the status state
-     * machine, not something this phase closes. This test documents that
-     * an application's status alone can never be trusted to imply an
-     * Assessment row actually exists.
-     */
-    public function test_generic_application_status_cannot_imply_an_assessment_exists(): void
-    {
-        $org = $this->approvedOrganization();
-        $opportunity = $this->opportunityFor($org);
-        $application = $this->applicationFor($opportunity, 'shortlisted');
-
-        Sanctum::actingAs($org->user);
-
-        $this->putJson("/api/organization/applications/{$application->id}/status", [
-            'status' => 'interview_scheduled',
-        ])->assertStatus(200);
-
-        $this->assertDatabaseHas('applications', [
+        $this->assertDatabaseMissing('applications', [
             'id' => $application->id,
             'status' => 'interview_scheduled',
         ]);
-        $this->assertDatabaseCount('assessments', 0);
     }
 
     public function test_organization_can_update_its_own_interview(): void
@@ -429,10 +407,39 @@ class OrganizationInterviewTest extends TestCase
 
         $this->assertDatabaseHas('applications', [
             'id' => $application->id,
-            'status' => 'interview_scheduled',
+            'status' => 'in_assessment',
         ]);
 
         $interview = Interview::firstOrFail();
+
+        $this->deleteJson("/api/organization/interviews/{$interview->id}")
+            ->assertStatus(200);
+
+        $this->assertDatabaseMissing('interviews', ['id' => $interview->id]);
+        $this->assertDatabaseCount('assessments', 0);
+        $this->assertDatabaseHas('applications', [
+            'id' => $application->id,
+            'status' => 'shortlisted',
+        ]);
+    }
+
+    /**
+     * A legacy application that reached `interview_scheduled` before this
+     * phase (or via the now-closed manual-input gap) must still revert to
+     * `shortlisted` when its assessment is deleted, exactly like a current
+     * `in_assessment` application does above.
+     */
+    public function test_deleting_an_interview_reverts_a_legacy_interview_scheduled_application_to_shortlisted(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+        $interview = $this->interviewFor($application);
+
+        $application->status = 'interview_scheduled';
+        $application->save();
+
+        Sanctum::actingAs($org->user);
 
         $this->deleteJson("/api/organization/interviews/{$interview->id}")
             ->assertStatus(200);
@@ -450,14 +457,15 @@ class OrganizationInterviewTest extends TestCase
      * independently (e.g. an organization used the generic status
      * endpoint), deleting the interview must not clobber that decision.
      */
-    public function test_deleting_an_interview_does_not_touch_an_application_status_other_than_interview_scheduled(): void
+    #[DataProvider('statusesThatMustNotBeReverted')]
+    public function test_deleting_an_interview_does_not_touch_an_application_status_other_than_in_assessment_or_interview_scheduled(string $status): void
     {
         $org = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($org);
         $application = $this->applicationFor($opportunity, 'shortlisted');
         $interview = $this->interviewFor($application);
 
-        $application->status = 'accepted';
+        $application->status = $status;
         $application->save();
 
         Sanctum::actingAs($org->user);
@@ -467,8 +475,20 @@ class OrganizationInterviewTest extends TestCase
 
         $this->assertDatabaseHas('applications', [
             'id' => $application->id,
-            'status' => 'accepted',
+            'status' => $status,
         ]);
+    }
+
+    /**
+     * @return array<string, array{0: string}>
+     */
+    public static function statusesThatMustNotBeReverted(): array
+    {
+        return [
+            'accepted' => ['accepted'],
+            'rejected' => ['rejected'],
+            'withdrawn' => ['withdrawn'],
+        ];
     }
 
     public function test_organization_cannot_delete_another_organizations_interview(): void

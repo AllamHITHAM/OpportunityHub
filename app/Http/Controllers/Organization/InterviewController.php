@@ -178,9 +178,11 @@ class InterviewController extends Controller
             // Cascades to the Interview row via assessments.id -> interviews.assessment_id.
             $assessment->delete();
 
-            // Never leave an application at `interview_scheduled` once its
-            // only assessment is gone.
-            if ($application->status === 'interview_scheduled') {
+            // Never leave an application at `in_assessment` (or, for legacy
+            // rows, `interview_scheduled`) once its only assessment is gone.
+            // Any other status (accepted/rejected/withdrawn/...) was set
+            // independently by the organization and must not be touched.
+            if (in_array($application->status, ['in_assessment', 'interview_scheduled'], true)) {
                 $application->status = 'shortlisted';
                 $application->save();
             }

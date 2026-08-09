@@ -267,9 +267,12 @@ class AssessmentMigrationTest extends TestCase
 
         Artisan::call('migrate');
 
-        // Roll back only the retarget migration -- assessments must still
-        // exist immediately after, since `down()` reads from it.
-        Artisan::call('migrate:rollback', ['--step' => 1]);
+        // Rolls back the two most recently applied migrations: Phase 6B-0's
+        // `add_in_assessment_status_to_applications_table` (unrelated to
+        // `interviews`, a no-op for this assertion) and the retarget
+        // migration itself. Assessments must still exist immediately after,
+        // since retarget's `down()` reads from it.
+        Artisan::call('migrate:rollback', ['--step' => 2]);
 
         $interview = DB::table('interviews')->first();
         $this->assertSame($applicationId, $interview->application_id);
@@ -288,7 +291,10 @@ class AssessmentMigrationTest extends TestCase
         $this->insertLegacyInterview($applicationId);
 
         Artisan::call('migrate');
-        Artisan::call('migrate:rollback', ['--step' => 2]);
+        // Three most recently applied migrations: Phase 6B-0's
+        // `add_in_assessment_status_to_applications_table`, the retarget
+        // migration, and `create_assessments_table` itself.
+        Artisan::call('migrate:rollback', ['--step' => 3]);
 
         $this->assertFalse(\Illuminate\Support\Facades\Schema::hasTable('assessments'));
         $this->assertTrue(\Illuminate\Support\Facades\Schema::hasColumn('interviews', 'application_id'));

@@ -19,6 +19,13 @@ use Illuminate\Support\Facades\DB;
  * transaction boundary, and application-status side effect are never
  * duplicated between them.
  *
+ * `Application.status` only ever moves to the generic `in_assessment` value
+ * from here (see `transitionToInAssessment()`) -- never to a type-specific
+ * value -- so a future `createQuizAssessment()` can reuse the exact same
+ * transition without introducing another Application status. `Assessment.type`
+ * still distinguishes interview vs. quiz; `Assessment.status`/`Interview.status`
+ * own their own type-specific lifecycles. See docs/BUSINESS_RULES.md.
+ *
  * Deliberately does not perform HTTP response construction, does not
  * return a JsonResponse, and does not perform organization-ownership
  * authorization -- all of that stays in the calling controllers, matching
@@ -27,14 +34,22 @@ use Illuminate\Support\Facades\DB;
  */
 class AssessmentService
 {
+    /**
+     * `interview_scheduled` stays allowed here purely for legacy rows that
+     * reached that status without a real Assessment ever being created
+     * (e.g. set directly through the generic status endpoint back when that
+     * input was still allowed) -- it lets such an application still receive
+     * its first real Assessment. `in_assessment` is deliberately absent: by
+     * construction it only exists once a real Assessment already does, so
+     * `assertNoExistingAssessment()` below is the guard for that case, not
+     * this list -- adding it here would only weaken that guard's coverage.
+     */
     private const ALLOWED_SOURCE_STATUSES = ['shortlisted', 'interview_scheduled'];
 
     /**
      * Creates an Assessment (`type=interview`) and its Interview detail
-     * record in one transaction, then moves the application to
-     * `interview_scheduled` (a temporary backward-compatibility status --
-     * see docs/BUSINESS_RULES.md -- not the long-term assessment-state
-     * design).
+     * record in one transaction, then moves the application to the generic
+     * `in_assessment` status (see `transitionToInAssessment()`).
      *
      * @param  array<string, mixed>  $interviewData  Already-validated Interview fields
      *                                                (interview_type, scheduled_at, ...).
@@ -47,8 +62,12 @@ class AssessmentService
      */
     public function createInterviewAssessment(Application $application, array $interviewData): Assessment
     {
-        $this->assertAllowedSourceStatus($application);
+        // Existing-assessment is checked first so that a genuine duplicate
+        // always reports as "already exists" (409), even for an
+        // `in_assessment` application (whose status alone would otherwise
+        // -- and redundantly -- also fail the source-status check below).
         $this->assertNoExistingAssessment($application);
+        $this->assertAllowedSourceStatus($application);
 
         try {
             return DB::transaction(function () use ($application, $interviewData) {
@@ -60,9 +79,7 @@ class AssessmentService
 
                 $assessment->interview()->create($interviewData);
 
-                $application->status = 'interview_scheduled';
-                $application->reviewed_at = now();
-                $application->save();
+                $this->transitionToInAssessment($application);
 
                 return $assessment;
             });
@@ -73,6 +90,20 @@ class AssessmentService
 
             throw $e;
         }
+    }
+
+    /**
+     * The single place `Application.status` moves to the generic
+     * `in_assessment` state. Every Assessment-creation path -- interview
+     * today, quiz once it exists -- must route through here instead of
+     * assigning the status literal itself, keeping this the one source of
+     * truth for the transition.
+     */
+    private function transitionToInAssessment(Application $application): void
+    {
+        $application->status = 'in_assessment';
+        $application->reviewed_at = now();
+        $application->save();
     }
 
     private function assertAllowedSourceStatus(Application $application): void

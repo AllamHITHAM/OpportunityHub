@@ -107,6 +107,110 @@ class OrganizationApplicationTest extends TestCase
         ]);
     }
 
+    public function test_organization_can_update_application_status_to_accepted(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity);
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->putJson("/api/organization/applications/{$application->id}/status", [
+            'status' => 'accepted',
+        ]);
+
+        $response->assertStatus(200)
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('data.status', 'accepted');
+
+        $this->assertDatabaseHas('applications', [
+            'id' => $application->id,
+            'status' => 'accepted',
+        ]);
+    }
+
+    public function test_organization_can_update_application_status_to_rejected(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity);
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->putJson("/api/organization/applications/{$application->id}/status", [
+            'status' => 'rejected',
+        ]);
+
+        $response->assertStatus(200)
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('data.status', 'rejected');
+
+        $this->assertDatabaseHas('applications', [
+            'id' => $application->id,
+            'status' => 'rejected',
+        ]);
+    }
+
+    /**
+     * `in_assessment` must only ever be reached through a real
+     * Assessment-creation workflow (AssessmentService::transitionToInAssessment()),
+     * never fabricated directly by an organization.
+     */
+    public function test_manual_status_update_cannot_set_in_assessment(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity);
+        $application->status = 'shortlisted';
+        $application->save();
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->putJson("/api/organization/applications/{$application->id}/status", [
+            'status' => 'in_assessment',
+        ]);
+
+        $response->assertStatus(422)
+            ->assertJsonValidationErrors(['status']);
+
+        $this->assertDatabaseHas('applications', [
+            'id' => $application->id,
+            'status' => 'shortlisted',
+        ]);
+        $this->assertDatabaseCount('assessments', 0);
+    }
+
+    /**
+     * Closes the previously-documented gap where an organization could set
+     * `interview_scheduled` through this endpoint with no real Assessment
+     * behind it. Existing rows may still legitimately hold this value (see
+     * ApplicationStatusMigrationTest for legacy-data coverage) -- only this
+     * endpoint's accepted input has changed.
+     */
+    public function test_manual_status_update_cannot_set_interview_scheduled(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity);
+        $application->status = 'shortlisted';
+        $application->save();
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->putJson("/api/organization/applications/{$application->id}/status", [
+            'status' => 'interview_scheduled',
+        ]);
+
+        $response->assertStatus(422)
+            ->assertJsonValidationErrors(['status']);
+
+        $this->assertDatabaseHas('applications', [
+            'id' => $application->id,
+            'status' => 'shortlisted',
+        ]);
+        $this->assertDatabaseCount('assessments', 0);
+    }
+
     public function test_invalid_application_status_is_rejected(): void
     {
         $org = $this->approvedOrganization();
