@@ -20,10 +20,12 @@ class AssessmentController extends Controller
 
     /**
      * The generic "organization chooses an assessment type" entry point.
-     * `type=interview` is implemented via the same shared workflow the
-     * legacy Interview endpoint uses; `type=quiz` is a recognized-but-
-     * unavailable value that is rejected explicitly here, before any
-     * database write, rather than by generic validation.
+     * `type=interview` and, as of Phase 6B-1, `type=quiz` are each
+     * implemented via their own `AssessmentService` method
+     * (`createInterviewAssessment()` / `createQuizAssessment()`) -- this
+     * controller only branches on `type` and translates the outcome into
+     * the shared response envelope; it never implements assessment-type
+     * business logic itself.
      */
     public function store(StoreAssessmentRequest $request, Application $application): JsonResponse
     {
@@ -35,19 +37,10 @@ class AssessmentController extends Controller
             ], 404);
         }
 
-        if ($request->validated('type') === 'quiz') {
-            return response()->json([
-                'success' => false,
-                'message' => 'Quiz assessments are not available yet.',
-                'data' => null,
-            ], 422);
-        }
-
         try {
-            $assessment = $this->assessments->createInterviewAssessment(
-                $application,
-                $request->validated('interview'),
-            );
+            $assessment = $request->validated('type') === 'quiz'
+                ? $this->assessments->createQuizAssessment($application, $request->validated('quiz'))
+                : $this->assessments->createInterviewAssessment($application, $request->validated('interview'));
         } catch (InvalidAssessmentSourceStatusException) {
             return response()->json([
                 'success' => false,
@@ -68,12 +61,17 @@ class AssessmentController extends Controller
         // `opportunity`/`studentProfile.user` are the rest of that
         // established contract. Nested dot-notation keeps this eager
         // loading (no N+1) rather than letting the client's own later
-        // property access lazy-load them one row at a time.
+        // property access lazy-load them one row at a time. `interview`/
+        // `quiz.questions` are both always loaded (exactly one is ever
+        // populated, matching `type`) -- the unused one simply serializes
+        // as `null`, the same permissive pattern `show()`/
+        // `showForApplication()` already use for `interview`.
         $assessment->load([
             'application.opportunity',
             'application.studentProfile.user',
             'application.cv',
             'interview',
+            'quiz.questions',
         ]);
         // Avoid redundant/duplicated data: the Interview's own
         // backward-compatible `application` accessor (see Interview.php)
@@ -103,7 +101,7 @@ class AssessmentController extends Controller
             ], 404);
         }
 
-        $assessment = $application->assessment()->with('interview')->first();
+        $assessment = $application->assessment()->with(['interview', 'quiz.questions'])->first();
         // `$application` here is the route-bound model reused as-is (not a
         // fresh fetch via `load()`), so its own missing relations need
         // filling in explicitly -- `loadMissing` skips `opportunity` if the
@@ -143,7 +141,7 @@ class AssessmentController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Assessment retrieved successfully',
-            'data' => $assessment->load('interview'),
+            'data' => $assessment->load(['interview', 'quiz.questions']),
         ]);
     }
 }

@@ -327,9 +327,9 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 ## 7. Assessments
 
-Added in Phase 4A-1 as the generic entity that lets an organization choose **Interview or Quiz** (or no formal assessment) once an application is shortlisted. **As of Phase 4A-2, `type=interview` can be created through the generic endpoint below**, using the exact same shared workflow (`App\Services\AssessmentService`) as the legacy Interview endpoint (section 6) — neither duplicates the other's transaction, status, duplicate, or validation logic. `type=quiz` is a recognized request value that returns an explicit, clean error (see below); there is still no Quiz table, controller, or UI, and no student accept/decline endpoint yet — those remain future phases.
+Added in Phase 4A-1 as the generic entity that lets an organization choose **Interview or Quiz** (or no formal assessment) once an application is shortlisted. **As of Phase 4A-2, `type=interview` can be created through the generic endpoint below**, using the exact same shared workflow (`App\Services\AssessmentService`) as the legacy Interview endpoint (section 6). **As of Phase 6B-1, `type=quiz` creates a real `Assessment` + `Quiz` the same way**, via the sibling `AssessmentService::createQuizAssessment()` — neither type duplicates the other's transaction, status, duplicate, or validation logic. Organization Quiz authoring (adding/editing/removing questions, publishing) is documented in section 7a below. There is no student attempt/submission endpoint yet for quiz — that remains a future phase, not documented here.
 
-An application has at most one `Assessment`. An `Assessment` has `type` (`interview` or `quiz` — only `interview` can ever be persisted today), `status` (`pending, scheduled, in_progress, completed, declined, cancelled`), and `result` (`null`, `pending`, `passed`, `failed`, or `waiting` — a decision not yet recorded is represented as `null`, not the string `"pending"`).
+An application has at most one `Assessment`. An `Assessment` has `type` (`interview` or `quiz`), `status` (`pending, scheduled, in_progress, completed, declined, cancelled`), and `result` (`null`, `pending`, `passed`, `failed`, or `waiting` — a decision not yet recorded is represented as `null`, not the string `"pending"`).
 
 ### POST /api/organization/applications/{application}/assessments
 - Middleware: `auth:sanctum, active, role:organization`
@@ -349,21 +349,33 @@ An application has at most one `Assessment`. An `Assessment` has `type` (`interv
     }
   }
   ```
-  `type` is required (`in:interview,quiz`). `interview` is required when `type=interview`; its fields are validated by the exact same shared rule source as the legacy endpoint's body (`interview_type`, `scheduled_at` required; `meeting_link` required when `interview_type=online`; `location` required when `interview_type=onsite`; `duration_minutes`/`interviewer_name`/`interviewer_email`/`notes` optional) — see `App\Http\Requests\Organization\Concerns\InteractsWithInterviewRules`.
-- Preconditions: application must be `shortlisted` or (legacy) `interview_scheduled` (422 otherwise; `in_assessment` is never an allowed source, since a real assessment already exists for it by construction); one assessment per application max (409 if one already exists) — identical rules to the legacy endpoint, enforced by the same service.
-- **`type=quiz`**: returns 422 immediately, before any database write — `{"success": false, "message": "Quiz assessments are not available yet.", "data": null}`. This is a deliberate, explicit business rejection, not a generic validation failure — `type=quiz` is syntactically valid.
+  or
+  ```json
+  {
+    "type": "quiz",
+    "quiz": {
+      "title": "Backend Fundamentals",
+      "instructions": "Choose the best answer.",
+      "time_limit_minutes": 30,
+      "passing_score": 70
+    }
+  }
+  ```
+  `type` is required (`in:interview,quiz`). `interview` is required when `type=interview`; its fields are validated by the exact same shared rule source as the legacy endpoint's body (`interview_type`, `scheduled_at` required; `meeting_link` required when `interview_type=online`; `location` required when `interview_type=onsite`; `duration_minutes`/`interviewer_name`/`interviewer_email`/`notes` optional) — see `App\Http\Requests\Organization\Concerns\InteractsWithInterviewRules`. `quiz` is required when `type=quiz`: `quiz.title` required, string, max 255; `quiz.instructions` nullable string; `quiz.time_limit_minutes` nullable integer, min 1; `quiz.passing_score` required, integer, 0–100. `questions` is **not** accepted here at all — see section 7a for adding them afterward.
+- Preconditions (both types): application must be `shortlisted` or (legacy) `interview_scheduled` (422 otherwise; `in_assessment` is never an allowed source, since a real assessment already exists for it by construction); one assessment per application max (409 if one already exists) — identical rules for both types, enforced by the same service (`AssessmentService`).
 - **Unknown `type`** (anything other than `interview`/`quiz`): standard Laravel validation failure (422, `{message, errors}` shape).
-- Success (`type=interview`): 201 — creates an `Assessment` (`type=interview`, `status=scheduled`, `result=null`) and its `Interview` in one transaction, and sets the application's **`status = in_assessment`** and `reviewed_at = now()` (same side effect as the legacy endpoint — see docs/BUSINESS_RULES.md section 5 for the full `in_assessment`/`interview_scheduled` write-path history). Response `data` is the `Assessment`, with `application` and `interview` nested — **not** `data.interview.application` (deliberately hidden at this response's call site via `makeHidden('application')`, since it would just duplicate `data.application` one level down; the legacy Interview endpoints are unaffected and keep exposing it).
-- Errors: 401, 403, 404 (`"Application not found"`, application not owned by this organization), 409 (`"An assessment already exists for this application"`), 422 (invalid source status: `"An assessment can only be created for shortlisted applications"`; `type=quiz`; validation failures).
+- Success (`type=interview`): 201 — creates an `Assessment` (`type=interview`, `status=scheduled`, `result=null`) and its `Interview` in one transaction, and sets the application's **`status = in_assessment`** and `reviewed_at = now()`. Response `data` is the `Assessment`, with `application` and `interview` nested — **not** `data.interview.application` (deliberately hidden at this response's call site via `makeHidden('application')`, since it would just duplicate `data.application` one level down; the legacy Interview endpoints are unaffected and keep exposing it).
+- Success (`type=quiz`): 201 — creates an `Assessment` (`type=quiz`, `status=pending`, `result=null`) and its `Quiz` (`status=draft`, no questions) in one transaction, and sets the application's **`status = in_assessment`** and `reviewed_at = now()` — the exact same Application-status side effect as `type=interview`, from the same `AssessmentService` transition helper. Response `data` is the `Assessment`, with `application` and `quiz` (with `quiz.questions`, always `[]` at creation) nested. See section 7a for the full quiz-lifecycle shape.
+- Errors: 401, 403, 404 (`"Application not found"`, application not owned by this organization), 409 (`"An assessment already exists for this application"`), 422 (invalid source status: `"An assessment can only be created for shortlisted applications"`; validation failures).
 
 ### GET /api/organization/applications/{application}/assessment
 - Middleware: `auth:sanctum, active, role:organization`
-- Success: 200 — `{"data": null}` if the (owned) application has no assessment yet; otherwise the assessment with `application` and `interview` (when `type=interview`) nested.
+- Success: 200 — `{"data": null}` if the (owned) application has no assessment yet; otherwise the assessment with `application` and `interview`/`quiz.questions` (whichever matches `type`) nested.
 - Errors: 401, 403, 404 (application not owned by this organization)
 
 ### GET /api/organization/assessments/{assessment}
 - Same middleware
-- Success: 200 — the assessment with `application` and `interview` nested
+- Success: 200 — the assessment with `application` and `interview`/`quiz.questions` nested
 - Errors: 401, 403, 404 (assessment not owned by this organization)
 
 ### GET /api/student/assessments
@@ -377,6 +389,58 @@ An application has at most one `Assessment`. An `Assessment` has `type` (`interv
 - Errors: 401, 403, 404 (assessment does not belong to this student)
 
 **Student-visible Interview fields**: `GET /api/student/assessments`, `GET /api/student/assessments/{assessment}`, and `GET /api/student/interviews` (section 6) all return `Interview` with `interviewer_email`, `company_feedback`, `rating`, and `decision` omitted — these are organization-internal (post-interview evaluation data, and a staff member's email), applied per-response via `App\Http\Controllers\Student\Concerns\HidesInternalInterviewFields`, not a model-level `$hidden`. The Organization-facing Interview/Assessment endpoints above are unaffected and continue to return every field. A student's own outcome is `assessment.result` (`null` until a real decision is recorded), not `interview.decision`.
+
+**Quiz-type assessments on the Student endpoints above**: as of Phase 6B-1, neither `GET /api/student/assessments` nor `GET /api/student/assessments/{assessment}` loads `quiz` — a `type=quiz` assessment currently returns with no quiz detail at all via these routes (not an error; the key is simply absent). This is expected, not a bug: there is no student-facing Quiz contract yet, and one is deliberately not introduced by this phase (see section 7a).
+
+---
+
+## 7a. Quizzes (Organization Authoring — Phase 6B-1)
+
+**Organization-only.** Viewing a quiz, adding/updating/deleting its questions while still a draft, and publishing it. **No student endpoint exists for Quiz** — viewing/starting/answering/submitting a quiz attempt is a later phase and is intentionally not documented here.
+
+A quiz belongs to one assessment (`type=quiz`, created via section 7's generic endpoint); an assessment can have at most one quiz. A quiz has `title`, `instructions` (nullable), `time_limit_minutes` (nullable), `passing_score` (integer, 0–100), and its own `status` (`draft`/`published`, independent of `Assessment.status`). A question belongs to one quiz; it has `prompt`, `type` (`multiple_choice`/`true_false`), `options` (JSON array for `multiple_choice`, always `null` for `true_false`), `correct_answer`, `points` (default 1), and `position` (default 0).
+
+**`correct_answer` is organization-internal** — every response below includes it because the organization authored it, but it must never reach a student response (there is none yet).
+
+### GET /api/organization/assessments/{assessment}/quiz
+- Middleware: `auth:sanctum, active, role:organization`
+- Success: 200 — `{"data": null}` if the (owned) assessment has no quiz yet (e.g. `type=interview`); otherwise the quiz with `questions` nested (ordered by `position`, then `id`).
+- Errors: 401, 403, 404 (`"Assessment not found"`, assessment not owned by this organization)
+
+### POST /api/organization/quizzes/{quiz}/questions
+- Same middleware
+- Body:
+  ```json
+  {
+    "prompt": "What is the capital of France?",
+    "type": "multiple_choice",
+    "options": ["Paris", "London", "Berlin"],
+    "correct_answer": "Paris",
+    "points": 1,
+    "position": 0
+  }
+  ```
+  `prompt` required, string, max 2000. `type` required, `in:multiple_choice,true_false`. `options` required (array, min 2 entries, each a non-empty string) when `type=multiple_choice`; not required for `true_false` — whatever is submitted for `true_false` is ignored, the server always persists `options=null` for that type. `correct_answer` required, string; for `multiple_choice` it must exactly match one submitted option (case-sensitive); for `true_false` it is canonicalized to exactly `"True"`/`"False"` before validation (`"true"`, `"TRUE"`, `"1"`, etc. all normalize the same way) and must resolve to one of those two values. `points` nullable integer, min 1 (defaults to 1 when omitted). `position` nullable integer, min 0 (defaults to 0 when omitted).
+- Preconditions: quiz belongs to the requesting organization; `quiz.status = draft`.
+- Success: 201 — the created question.
+- Errors: 401, 403, 404 (`"Quiz not found"`, quiz not owned by this organization), 422 (`"Published quizzes cannot be modified"`; validation failures)
+
+### PUT /api/organization/quizzes/{quiz}/questions/{question}
+- Same middleware and body/validation as POST above (full replacement, not a partial update)
+- Preconditions: quiz belongs to the requesting organization; `question.quiz_id` matches the route's `{quiz}`; `quiz.status = draft`
+- Success: 200 — the updated question.
+- Errors: 401, 403, 404 (`"Quiz not found"` for a wrong-owner quiz; `"Question not found"` when the question doesn't belong to `{quiz}`), 422 (`"Published quizzes cannot be modified"`; validation failures)
+
+### DELETE /api/organization/quizzes/{quiz}/questions/{question}
+- Same middleware and ownership/draft preconditions as PUT above
+- Success: 200 — hard delete, `data: null`
+- Errors: 401, 403, 404 (`"Quiz not found"` / `"Question not found"`), 422 (`"Published quizzes cannot be modified"`)
+
+### PUT /api/organization/quizzes/{quiz}/publish
+- Same middleware
+- Preconditions: quiz belongs to the requesting organization; `quiz.status = draft` (422 `"Only draft quizzes can be published"` otherwise); at least one question exists (422 `"A quiz must have at least one question before it can be published"` otherwise). Every question is already structurally valid by construction (both create and update are gated by the same validation), so no further per-question re-validation happens here.
+- Success: 200 — sets `quiz.status = published` and `assessment.status = scheduled` in one transaction. **Does not touch `application.status`** — it is already `in_assessment` from quiz creation and stays there. Response `data` is the quiz with `questions` nested, plus `assessment.application` loaded.
+- Errors: 401, 403, 404 (`"Quiz not found"`), 422 (see preconditions above)
 
 ---
 

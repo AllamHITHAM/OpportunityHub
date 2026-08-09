@@ -14,6 +14,7 @@ use App\Http\Controllers\Organization\InterviewController as OrganizationIntervi
 use App\Http\Controllers\Organization\OpportunityController;
 use App\Http\Controllers\Organization\OpportunitySkillController;
 use App\Http\Controllers\Organization\OrganizationProfileController;
+use App\Http\Controllers\Organization\QuizController as OrganizationQuizController;
 use App\Http\Controllers\Public\OpportunityController as PublicOpportunityController;
 use App\Http\Controllers\Student\ApplicationController as StudentApplicationController;
 use App\Http\Controllers\Student\AssessmentController as StudentAssessmentController;
@@ -98,6 +99,12 @@ Route::middleware(['auth:sanctum', 'active', 'role:organization'])->group(functi
     Route::post('/organization/applications/{application}/assessments', [OrganizationAssessmentController::class, 'store']);
     Route::get('/organization/applications/{application}/assessment', [OrganizationAssessmentController::class, 'showForApplication']);
     Route::get('/organization/assessments/{assessment}', [OrganizationAssessmentController::class, 'show']);
+
+    Route::get('/organization/assessments/{assessment}/quiz', [OrganizationQuizController::class, 'show']);
+    Route::post('/organization/quizzes/{quiz}/questions', [OrganizationQuizController::class, 'storeQuestion']);
+    Route::put('/organization/quizzes/{quiz}/questions/{question}', [OrganizationQuizController::class, 'updateQuestion']);
+    Route::delete('/organization/quizzes/{quiz}/questions/{question}', [OrganizationQuizController::class, 'destroyQuestion']);
+    Route::put('/organization/quizzes/{quiz}/publish', [OrganizationQuizController::class, 'publish']);
 
     Route::post('/organization/applications/{application}/analyze', [ApplicationAnalysisController::class, 'analyze']);
     Route::get('/organization/applications/{application}/analysis', [ApplicationAnalysisController::class, 'show']);

@@ -12,19 +12,21 @@ use Illuminate\Support\Facades\DB;
 /**
  * Owns the shared workflow for turning a shortlisted (or already
  * interview_scheduled) Application into an Assessment plus its
- * type-specific detail record. Both the legacy
- * `POST .../applications/{application}/interview` endpoint and the generic
- * `POST .../applications/{application}/assessments` endpoint call this
- * directly, so the status precondition, duplicate-assessment guard,
- * transaction boundary, and application-status side effect are never
- * duplicated between them.
+ * type-specific detail record. The legacy
+ * `POST .../applications/{application}/interview` endpoint,
+ * `POST .../applications/{application}/assessments` with `type=interview`
+ * (both `createInterviewAssessment()`), and, as of Phase 6B-1,
+ * `type=quiz` (`createQuizAssessment()`) all call this directly, so the
+ * status precondition, duplicate-assessment guard, transaction boundary,
+ * and application-status side effect are never duplicated between them.
  *
  * `Application.status` only ever moves to the generic `in_assessment` value
  * from here (see `transitionToInAssessment()`) -- never to a type-specific
- * value -- so a future `createQuizAssessment()` can reuse the exact same
- * transition without introducing another Application status. `Assessment.type`
- * still distinguishes interview vs. quiz; `Assessment.status`/`Interview.status`
- * own their own type-specific lifecycles. See docs/BUSINESS_RULES.md.
+ * value -- so `createQuizAssessment()` reuses the exact same transition
+ * `createInterviewAssessment()` does, without introducing another
+ * Application status. `Assessment.type` still distinguishes interview vs.
+ * quiz; `Assessment.status`/`Interview.status`/`Quiz.status` own their own
+ * type-specific lifecycles. See docs/BUSINESS_RULES.md.
  *
  * Deliberately does not perform HTTP response construction, does not
  * return a JsonResponse, and does not perform organization-ownership
@@ -93,11 +95,58 @@ class AssessmentService
     }
 
     /**
+     * Creates an Assessment (`type=quiz`) and its Quiz shell -- no
+     * questions yet, those are added afterward one at a time via
+     * `App\Http\Controllers\Organization\QuizController` -- in one
+     * transaction, then moves the application to the generic `in_assessment`
+     * status (see `transitionToInAssessment()`). The Quiz always starts
+     * `status=draft` and the Assessment `status=pending`; publishing
+     * (`QuizController::publish()`) is a separate, later step that moves the
+     * Assessment to `scheduled` without touching the Application again.
+     *
+     * @param  array<string, mixed>  $quizData  Already-validated Quiz fields
+     *                                           (title, instructions, time_limit_minutes, passing_score).
+     *
+     * @throws InvalidAssessmentSourceStatusException  When the application's status
+     *                                                  is not `shortlisted`/`interview_scheduled`.
+     * @throws AssessmentAlreadyExistsException         When the application already has an
+     *                                                   assessment (pre-check or a translated
+     *                                                   unique-constraint violation).
+     */
+    public function createQuizAssessment(Application $application, array $quizData): Assessment
+    {
+        $this->assertNoExistingAssessment($application);
+        $this->assertAllowedSourceStatus($application);
+
+        try {
+            return DB::transaction(function () use ($application, $quizData) {
+                $assessment = $application->assessment()->create([
+                    'type' => 'quiz',
+                    'status' => 'pending',
+                    'result' => null,
+                ]);
+
+                $assessment->quiz()->create(array_merge($quizData, ['status' => 'draft']));
+
+                $this->transitionToInAssessment($application);
+
+                return $assessment;
+            });
+        } catch (QueryException $e) {
+            if ($this->isDuplicateAssessmentViolation($e)) {
+                throw new AssessmentAlreadyExistsException();
+            }
+
+            throw $e;
+        }
+    }
+
+    /**
      * The single place `Application.status` moves to the generic
-     * `in_assessment` state. Every Assessment-creation path -- interview
-     * today, quiz once it exists -- must route through here instead of
-     * assigning the status literal itself, keeping this the one source of
-     * truth for the transition.
+     * `in_assessment` state. Every Assessment-creation path -- interview and,
+     * as of Phase 6B-1, quiz -- routes through here instead of assigning the
+     * status literal itself, keeping this the one source of truth for the
+     * transition.
      */
     private function transitionToInAssessment(Application $application): void
     {

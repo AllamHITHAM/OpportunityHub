@@ -310,30 +310,6 @@ class StoreAssessmentTest extends TestCase
         $this->assertDatabaseCount('interviews', 0);
     }
 
-    public function test_type_quiz_returns_explicit_422_and_writes_nothing(): void
-    {
-        $org = $this->approvedOrganization();
-        $opportunity = $this->opportunityFor($org);
-        $application = $this->applicationFor($opportunity, 'shortlisted');
-
-        Sanctum::actingAs($org->user);
-
-        $response = $this->postJson(
-            "/api/organization/applications/{$application->id}/assessments",
-            ['type' => 'quiz']
-        );
-
-        $response->assertStatus(422)
-            ->assertJsonPath('success', false)
-            ->assertJsonPath('message', 'Quiz assessments are not available yet.');
-
-        $this->assertDatabaseCount('assessments', 0);
-        $this->assertDatabaseHas('applications', [
-            'id' => $application->id,
-            'status' => 'shortlisted',
-        ]);
-    }
-
     public function test_unknown_type_returns_standard_validation_422(): void
     {
         $org = $this->approvedOrganization();
