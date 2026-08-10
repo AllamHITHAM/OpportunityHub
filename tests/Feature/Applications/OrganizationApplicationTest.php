@@ -93,8 +93,14 @@ class OrganizationApplicationTest extends TestCase
         $orgB = $this->approvedOrganization();
         Sanctum::actingAs($orgB->user);
 
+        // A still-manually-settable status is used here deliberately -- the
+        // point of this test is the ownership check in the controller body,
+        // which Form Request validation would otherwise short-circuit
+        // before it ever runs if the status itself were rejected first (see
+        // the `accepted` case below, now covered by
+        // test_manual_status_update_cannot_set_accepted instead).
         $response = $this->putJson("/api/organization/applications/{$application->id}/status", [
-            'status' => 'accepted',
+            'status' => 'rejected',
         ]);
 
         $response->assertStatus(404)
@@ -104,28 +110,6 @@ class OrganizationApplicationTest extends TestCase
         $this->assertDatabaseHas('applications', [
             'id' => $application->id,
             'status' => 'pending',
-        ]);
-    }
-
-    public function test_organization_can_update_application_status_to_accepted(): void
-    {
-        $org = $this->approvedOrganization();
-        $opportunity = $this->opportunityFor($org);
-        $application = $this->applicationFor($opportunity);
-
-        Sanctum::actingAs($org->user);
-
-        $response = $this->putJson("/api/organization/applications/{$application->id}/status", [
-            'status' => 'accepted',
-        ]);
-
-        $response->assertStatus(200)
-            ->assertJsonPath('success', true)
-            ->assertJsonPath('data.status', 'accepted');
-
-        $this->assertDatabaseHas('applications', [
-            'id' => $application->id,
-            'status' => 'accepted',
         ]);
     }
 
@@ -148,6 +132,67 @@ class OrganizationApplicationTest extends TestCase
         $this->assertDatabaseHas('applications', [
             'id' => $application->id,
             'status' => 'rejected',
+        ]);
+    }
+
+    /**
+     * Phase 6C-0: `accepted` now means specifically "the student accepted
+     * the Offer" -- only the future `Student\OfferController::accept()`
+     * (Phase 6C-1) may write it. An organization can no longer set it
+     * directly through the generic status endpoint, closing the gap where
+     * "accepted" previously meant nothing more precise than "the
+     * organization picked this candidate" with no student confirmation
+     * step at all.
+     */
+    public function test_manual_status_update_cannot_set_accepted(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity);
+        $application->status = 'shortlisted';
+        $application->save();
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->putJson("/api/organization/applications/{$application->id}/status", [
+            'status' => 'accepted',
+        ]);
+
+        $response->assertStatus(422)
+            ->assertJsonValidationErrors(['status']);
+
+        $this->assertDatabaseHas('applications', [
+            'id' => $application->id,
+            'status' => 'shortlisted',
+        ]);
+    }
+
+    /**
+     * `offer_sent` must only ever be reached through the future
+     * `OfferService::sendOffer()` (Phase 6C-1), never fabricated directly
+     * by an organization -- the same posture already applied to
+     * `in_assessment` below.
+     */
+    public function test_manual_status_update_cannot_set_offer_sent(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity);
+        $application->status = 'in_assessment';
+        $application->save();
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->putJson("/api/organization/applications/{$application->id}/status", [
+            'status' => 'offer_sent',
+        ]);
+
+        $response->assertStatus(422)
+            ->assertJsonValidationErrors(['status']);
+
+        $this->assertDatabaseHas('applications', [
+            'id' => $application->id,
+            'status' => 'in_assessment',
         ]);
     }
 
@@ -185,7 +230,7 @@ class OrganizationApplicationTest extends TestCase
      * `interview_scheduled` through this endpoint with no real Assessment
      * behind it. Existing rows may still legitimately hold this value (see
      * ApplicationStatusMigrationTest for legacy-data coverage) -- only this
-     * endpoint's accepted input has changed.
+     * endpoint's accepted input has changed, not what the column may store.
      */
     public function test_manual_status_update_cannot_set_interview_scheduled(): void
     {
@@ -209,6 +254,37 @@ class OrganizationApplicationTest extends TestCase
             'status' => 'shortlisted',
         ]);
         $this->assertDatabaseCount('assessments', 0);
+    }
+
+    /**
+     * Pre-existing behavior (`ApplicationController::updateStatus()`
+     * already blocked this before Phase 6C-0) that had no direct test
+     * coverage until now -- added here as part of confirming Phase 6C-0's
+     * narrower `accepted`/`rejected`/`reviewed`/`shortlisted` input set
+     * didn't accidentally loosen this guard.
+     */
+    public function test_cannot_update_status_of_a_withdrawn_application(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity);
+        $application->status = 'withdrawn';
+        $application->save();
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->putJson("/api/organization/applications/{$application->id}/status", [
+            'status' => 'rejected',
+        ]);
+
+        $response->assertStatus(409)
+            ->assertJsonPath('success', false)
+            ->assertJsonPath('message', 'Cannot change the status of a withdrawn application');
+
+        $this->assertDatabaseHas('applications', [
+            'id' => $application->id,
+            'status' => 'withdrawn',
+        ]);
     }
 
     public function test_invalid_application_status_is_rejected(): void

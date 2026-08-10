@@ -137,7 +137,7 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 ### GET /api/student/dashboard
 - Same middleware
-- Success: 200 — `{"data": {"total_applications": n, "pending_applications": n, "reviewed_applications": n, "shortlisted_applications": n, "accepted_applications": n, "rejected_applications": n, "total_cvs": n, "total_skills": n, "total_interviews": n}}`
+- Success: 200 — `{"data": {"total_applications": n, "pending_applications": n, "reviewed_applications": n, "shortlisted_applications": n, "accepted_applications": n, "rejected_applications": n, "total_cvs": n, "total_skills": n, "total_interviews": n}}`. Unchanged contract as of Phase 6C-0 — `accepted_applications` still counts `status = accepted` rows exactly as before; only what a *new* `accepted` row means has shifted (see docs/BUSINESS_RULES.md section 5). No `offer_sent_applications` field yet — deferred to Phase 6C-4.
 - Errors: 401, 403, 404
 
 ---
@@ -200,7 +200,7 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 ### GET /api/organization/dashboard
 - Same middleware
-- Success: 200 — `{"data": {"total_opportunities": n, "open_opportunities": n, "closed_opportunities": n, "draft_opportunities": n, "total_applications": n, "pending_applications": n, "shortlisted_applications": n, "accepted_applications": n, "rejected_applications": n, "total_interviews": n, "completed_interviews": n}}`
+- Success: 200 — `{"data": {"total_opportunities": n, "open_opportunities": n, "closed_opportunities": n, "draft_opportunities": n, "total_applications": n, "pending_applications": n, "shortlisted_applications": n, "accepted_applications": n, "rejected_applications": n, "total_interviews": n, "completed_interviews": n}}`. Unchanged contract as of Phase 6C-0 — `accepted_applications` still counts `status = accepted` rows exactly as before; only what a *new* `accepted` row means has shifted (see docs/BUSINESS_RULES.md section 5). No `offer_sent_applications` field yet — deferred to Phase 6C-4.
 - Errors: 401, 403
 
 ---
@@ -250,7 +250,7 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 ### PUT /api/organization/applications/{application}/status
 - Same middleware
-- Body: `status` (required, in: reviewed, shortlisted, accepted, rejected — **not** `pending`/`withdrawn`). **As of Phase 6B-0, `in_assessment` and `interview_scheduled` are no longer accepted here** — `in_assessment` must only ever be reached through a real Assessment-creation workflow (section 7), and `interview_scheduled` (deprecated legacy value) can no longer be fabricated with no assessment behind it. Either value in the request body now fails standard `in:` validation (422). Existing rows may still legitimately hold `in_assessment` or `interview_scheduled` — this restriction is on input only, never on what's stored or returned (see the response note below).
+- Body: `status` (required, in: reviewed, shortlisted, rejected — **not** `pending`/`withdrawn`). **As of Phase 6B-0, `in_assessment` and `interview_scheduled` are no longer accepted here**, and **as of Phase 6C-0, `accepted` and `offer_sent` are no longer accepted here either** — `in_assessment` and `offer_sent` must only ever be reached through their real domain workflow (Assessment creation, section 7; the future Offer workflow, Phase 6C-1), `interview_scheduled` (deprecated legacy value) can no longer be fabricated with no assessment behind it, and `accepted` now means specifically "the student accepted the Offer" (only the future `Student\OfferController::accept()` may write it — see docs/BUSINESS_RULES.md section 5). Any of these four values in the request body now fails standard `in:` validation (422). Existing rows may still legitimately hold any of them — this restriction is on input only, never on what's stored or returned (see the response note below). `accepted` is consequently unreachable through any current API action until the Offer workflow (Phase 6C-1) exists — intentional, not a bug.
 - Success: 200 — also sets `reviewed_at = now()` on every successful call, even if re-setting the same status.
 - Errors: 401, 403, 404, 409 ("Cannot change the status of a withdrawn application"), 422
 

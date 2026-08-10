@@ -130,11 +130,14 @@ QuizAttempt               (Phase 6B-3)
 ```
 
 - `Application` owns recruitment lifecycle only (`status`: pending,
-  reviewed, shortlisted, in_assessment, interview_scheduled, accepted,
-  rejected, withdrawn). As of Phase 6B-0, `in_assessment` is the generic
-  value written whenever a real Assessment exists (interview or quiz);
-  `interview_scheduled` is deprecated legacy-compatibility only —
-  see docs/BUSINESS_RULES.md section 5.
+  reviewed, shortlisted, in_assessment, offer_sent, interview_scheduled,
+  accepted, rejected, withdrawn). As of Phase 6B-0, `in_assessment` is the
+  generic value written whenever a real Assessment exists (interview or
+  quiz); as of Phase 6C-0, `offer_sent` is the generic value reserved for
+  the future Offer workflow (Phase 6C-1) to write, and `accepted` means
+  specifically "the student accepted the Offer" rather than merely "the
+  organization chose this candidate"; `interview_scheduled` is deprecated
+  legacy-compatibility only — see docs/BUSINESS_RULES.md section 5.
 - `Assessment` owns the shared assessment lifecycle: `type` (`interview` |
   `quiz`), `status`, `result`, `completed_at`.
 - `Interview` owns interview-specific scheduling/outcome detail
@@ -434,6 +437,62 @@ encoding assessment-specific detail into `Application.status`:
   `database/migrations/2026_08_08_161938_add_in_assessment_status_to_applications_table.php`.
 - Quiz tables/models/controllers are still not implemented — this phase
   only prepares `Application.status` to be quiz-ready.
+
+---
+
+## Offer Status Architecture Migration (Phase 6C-0)
+
+Prepares `Application.status` for the future Offer workflow (Phase 6C-1)
+the same way Phase 6B-0 prepared it for the generic Assessment workflow:
+adds one new generic status value, and narrows what the organization may
+still set manually. Does **not** create any part of the Offer feature
+itself — no `offers` table, no `Offer` model, no `OfferService`, no Offer
+controllers/requests/routes. See docs/BUSINESS_RULES.md section 5 for the
+full narrative and docs/API.md section 5 for the endpoint contract.
+
+- **`offer_sent`** is the one new `Application.status` value. It is
+  reserved for the future `OfferService::sendOffer()` (Phase 6C-1) to
+  write — mirroring exactly how `in_assessment` is written from exactly one
+  place (`AssessmentService::transitionToInAssessment()`). Nothing in the
+  codebase writes `offer_sent` yet; Phase 6C-0 only makes the value valid
+  in the database enum and API response contract.
+- **`accepted`'s meaning changes, without changing its storage.** Before
+  Phase 6C-0, `accepted` meant "the organization chose this candidate,"
+  set directly through the generic status endpoint (and, in practice,
+  never actually exercised by the Flutter app — no UI action ever called
+  it). As of Phase 6C-0, `accepted` means specifically "the student
+  accepted the Offer" — the only future workflow permitted to write it is
+  `Student\OfferController::accept()` (Phase 6C-1). The column, its enum
+  values, and every pre-existing `accepted` row are completely untouched;
+  only `UpdateApplicationStatusRequest`'s allowed input set changed. This
+  is a deliberate, temporary gap: **`accepted` cannot be reached through
+  any current API action until Phase 6C-1 ships** — no placeholder/interim
+  endpoint was added, since one would just have to be removed again once
+  the real Offer-accept workflow exists.
+- **The generic status endpoint** (`PUT /api/organization/applications/{application}/status`,
+  see docs/API.md section 5) now accepts only `reviewed, shortlisted,
+  rejected` — `accepted` and `offer_sent` join the pre-existing exclusions
+  of `in_assessment` and `interview_scheduled`. `rejected` is deliberately
+  left fully manually-settable and unrestricted by assessment state (no
+  "assessment must be completed first" precondition was added) — Phase
+  6C-0 does not implement an application-status state machine, only tightens
+  this one endpoint's allowed input set.
+- **Migration**: `applications.status` gains `offer_sent` in-place (no
+  existing row is rewritten); rollback moves any `offer_sent` row back to
+  `in_assessment` before shrinking the enum, so it stays reversible without
+  data loss — the same pattern
+  `2026_08_08_161938_add_in_assessment_status_to_applications_table.php`
+  already established. See
+  `database/migrations/2026_08_10_134012_add_offer_sent_status_to_applications_table.php`.
+- **Dashboard counts are unchanged.** `GET /api/organization/dashboard` and
+  `GET /api/student/dashboard` still expose `accepted_applications`/
+  `rejected_applications` with the same field names and query shape;
+  `accepted_applications` simply now reflects the narrower, student-driven
+  meaning for any *new* data going forward. No `offer_sent_applications`
+  field was added — deferred to Phase 6C-4, once the Offer feature exists
+  to make such a count meaningful.
+- Offer tables/models/controllers are still not implemented — this phase
+  only prepares `Application.status` to be Offer-ready.
 
 ---
 

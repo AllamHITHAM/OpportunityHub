@@ -16,6 +16,12 @@ use Tests\TestCase;
  * `in_assessment` value while still accepting the legacy `interview_scheduled`
  * value, and that both read back and serialize correctly through the API --
  * `status` is never translated or hidden (see docs/BUSINESS_RULES.md).
+ *
+ * Phase 6C-0 extends this with the same coverage for the new `offer_sent`
+ * value. `offer_sent`'s rollback-specific behavior (converting existing
+ * `offer_sent` rows back to `in_assessment`) is covered separately in
+ * OfferSentStatusMigrationTest, which needs `DatabaseMigrations` rather than
+ * this file's `RefreshDatabase` to roll the migration itself back and forward.
  */
 class ApplicationStatusMigrationTest extends TestCase
 {
@@ -33,6 +39,20 @@ class ApplicationStatusMigrationTest extends TestCase
             'status' => 'in_assessment',
         ]);
         $this->assertSame('in_assessment', $application->fresh()->status);
+    }
+
+    public function test_offer_sent_is_a_valid_application_status(): void
+    {
+        $application = $this->applicationFor($this->opportunityFor($this->approvedOrganization()));
+
+        $application->status = 'offer_sent';
+        $application->save();
+
+        $this->assertDatabaseHas('applications', [
+            'id' => $application->id,
+            'status' => 'offer_sent',
+        ]);
+        $this->assertSame('offer_sent', $application->fresh()->status);
     }
 
     public function test_legacy_interview_scheduled_remains_a_valid_application_status(): void
@@ -64,6 +84,23 @@ class ApplicationStatusMigrationTest extends TestCase
         $response->assertStatus(200)
             ->assertJsonPath('success', true)
             ->assertJsonPath('data.status', 'in_assessment');
+    }
+
+    public function test_an_offer_sent_application_serializes_correctly_via_the_api(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity);
+        $application->status = 'offer_sent';
+        $application->save();
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->getJson("/api/organization/applications/{$application->id}");
+
+        $response->assertStatus(200)
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('data.status', 'offer_sent');
     }
 
     /**
