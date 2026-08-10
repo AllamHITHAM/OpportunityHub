@@ -183,6 +183,52 @@ class StudentAssessmentTest extends TestCase
         $this->assertArrayNotHasKey('decision', $response->json('data.interview'));
     }
 
+    /**
+     * Phase 6B-3 privacy regression: `correct_answer` must never leak
+     * through the nested `assessment.quiz.questions` on either the list or
+     * single-assessment endpoint -- the exact "major regression" the
+     * privacy fix in `Student\AssessmentController` guards against.
+     */
+    public function test_student_assessment_index_hides_correct_answer_on_nested_quiz(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+
+        $student = $this->studentWithProfileAndCv();
+        $application = $this->applicationForStudent($opportunity, $student, 'in_assessment');
+        $this->quizAssessmentFor($application);
+
+        Sanctum::actingAs($student->user);
+
+        $response = $this->getJson('/api/student/assessments');
+
+        $response->assertStatus(200);
+        $question = $response->json('data.0.quiz.questions.0');
+        $this->assertArrayNotHasKey('correct_answer', $question);
+        $this->assertSame('What is the capital of France?', $question['prompt']);
+        $this->assertSame(['Paris', 'London', 'Berlin'], $question['options']);
+    }
+
+    public function test_student_assessment_show_hides_correct_answer_on_nested_quiz(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+
+        $student = $this->studentWithProfileAndCv();
+        $application = $this->applicationForStudent($opportunity, $student, 'in_assessment');
+        $assessment = $this->quizAssessmentFor($application);
+
+        Sanctum::actingAs($student->user);
+
+        $response = $this->getJson("/api/student/assessments/{$assessment->id}");
+
+        $response->assertStatus(200);
+        $question = $response->json('data.quiz.questions.0');
+        $this->assertArrayNotHasKey('correct_answer', $question);
+        $this->assertSame('draft', $response->json('data.quiz.status'));
+        $this->assertSame(70, $response->json('data.quiz.passing_score'));
+    }
+
     public function test_guest_cannot_view_student_assessments(): void
     {
         $response = $this->getJson('/api/student/assessments');
@@ -284,6 +330,38 @@ class StudentAssessmentTest extends TestCase
         ]);
 
         return $assessment->fresh('interview');
+    }
+
+    /**
+     * A quiz-type assessment with one multiple_choice question carrying a
+     * real `correct_answer` -- used by the Phase 6B-3 privacy regression
+     * tests to prove it's actually stripped from the nested
+     * `assessment.quiz.questions`, not just coincidentally absent.
+     */
+    private function quizAssessmentFor(Application $application): Assessment
+    {
+        $assessment = $application->assessment()->create([
+            'type' => 'quiz',
+            'status' => 'pending',
+            'result' => null,
+        ]);
+
+        $quiz = $assessment->quiz()->create([
+            'title' => 'Backend Fundamentals',
+            'passing_score' => 70,
+            'status' => 'draft',
+        ]);
+
+        $quiz->questions()->create([
+            'prompt' => 'What is the capital of France?',
+            'type' => 'multiple_choice',
+            'options' => ['Paris', 'London', 'Berlin'],
+            'correct_answer' => 'Paris',
+            'points' => 1,
+            'position' => 0,
+        ]);
+
+        return $assessment->fresh('quiz.questions');
     }
 
     /**

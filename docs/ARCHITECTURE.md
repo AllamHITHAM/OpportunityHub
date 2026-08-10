@@ -109,6 +109,7 @@ shared shape:
 ```
 Application
   hasOne Assessment
+  hasMany QuizAttempt    (Phase 6B-3)
 
 Assessment
   belongsTo Application
@@ -118,9 +119,14 @@ Assessment
 Quiz                      (Phase 6B-1)
   belongsTo Assessment
   hasMany Question
+  hasMany QuizAttempt     (Phase 6B-3)
 
 Question                  (Phase 6B-1)
   belongsTo Quiz
+
+QuizAttempt               (Phase 6B-3)
+  belongsTo Quiz
+  belongsTo Application
 ```
 
 - `Application` owns recruitment lifecycle only (`status`: pending,
@@ -149,9 +155,16 @@ Question                  (Phase 6B-1)
   assessment has at most one quiz (enforced by `quizzes.assessment_id`
   being unique). As of Phase 6B-1, `quiz` is no longer merely a
   schema-ready `assessment.type` value — real `quizzes`/`questions` tables,
-  a `QuizController`, and organization-side authoring all exist. There is
-  still no student-facing Quiz UI or attempt/submission logic — see
-  "Quiz Authoring Architecture (Phase 6B-1)" below.
+  a `QuizController`, and organization-side authoring all exist. As of
+  Phase 6B-3, real student-facing Quiz taking/grading exists too — see
+  "Quiz Authoring Architecture (Phase 6B-1)" and "Student Quiz Taking
+  Architecture (Phase 6B-3)" below.
+- `QuizAttempt` (Phase 6B-3) belongs to both `Quiz` and `Application`
+  directly (`quiz_attempts.quiz_id`/`application_id` are real columns, not
+  a "through" relation) — a plain `hasMany` on each side, deliberately not
+  an artificial `hasOne`, even though the `(quiz_id, application_id)`
+  unique constraint means v1 only ever produces one row per pair. See
+  "Student Quiz Taking Architecture (Phase 6B-3)" for why.
 - This is a backend-only restructuring: all pre-existing Interview API
   routes, request/response bodies, and status codes are unchanged (see
   docs/API.md section 6); `application.status` is unchanged (see
@@ -161,11 +174,12 @@ Question                  (Phase 6B-1)
 
 ## Quiz Authoring Architecture (Phase 6B-1)
 
-Quiz v1 is organization-authoring only: creating a quiz `Assessment`,
+The organization side of Quiz v1: creating a quiz `Assessment`,
 adding/editing/removing its `Question`s while still a draft, and
-publishing it. Grading, attempts, and every student-facing concern are
-explicitly out of scope and deferred to a later phase — nothing here
-assumes or half-builds toward a specific future attempt design.
+publishing it. Student-side taking/grading/attempts is a separate,
+later phase — see "Student Quiz Taking Architecture (Phase 6B-3)" below,
+which builds directly on top of everything here without changing any of
+it.
 
 - **`AssessmentService::createQuizAssessment()`** is the quiz sibling of
   `createInterviewAssessment()` (see the "Assessment Creation Workflow"
@@ -216,13 +230,15 @@ assumes or half-builds toward a specific future attempt design.
   mis-interpreting a per-row `options` value as authoritative for a type
   where it never varies.
 - **`Question.correct_answer` is organization-internal** — `Question::ORGANIZATION_ONLY_FIELDS`
-  names it as the single field a future student-facing serialization path
-  must hide (the quiz counterpart to
-  `App\Http\Controllers\Student\Concerns\HidesInternalInterviewFields`).
-  Every organization-facing response includes it today (the organization
-  authored it); `tests/Unit/Models/QuestionPrivacyTest.php` exists purely
-  to keep this constant from silently drifting before any student
-  endpoint is built on top of it.
+  names it as the single field every student-facing serialization path
+  must hide. As of Phase 6B-3 that path is real:
+  `App\Http\Controllers\Student\Concerns\HidesInternalQuestionFields` (the
+  quiz counterpart to `HidesInternalInterviewFields`) reads this exact
+  constant rather than repeating the field name — see "Student Quiz
+  Taking Architecture (Phase 6B-3)" below. Every organization-facing
+  response still includes it (the organization authored it);
+  `tests/Unit/Models/QuestionPrivacyTest.php` continues to guard the
+  constant itself from silently drifting.
 - **No Quiz/Assessment delete endpoint.** The only existing Assessment
   cleanup path in this codebase is `InterviewController::destroy()`
   (interview-specific: delete the assessment, cascade to the interview,
@@ -237,6 +253,85 @@ assumes or half-builds toward a specific future attempt design.
   unwanted interview (`DELETE /api/organization/interviews/{interview}`
   already exists). Deferred rather than solved here, per minimal scope —
   flagged explicitly so it isn't mistaken for an oversight.
+
+---
+
+## Student Quiz Taking Architecture (Phase 6B-3)
+
+Adds the student side Quiz v1 was missing: viewing a *published* quiz with
+the answer key stripped, starting the one attempt allowed, and submitting
+it for immediate server-side auto-grading. `App\Http\Controllers\Student\QuizController`
+owns all three actions; no service class was introduced for grading —
+the logic is small, used from exactly one place, and needs a single
+transaction/lock scope that a service layer would only have to hand back
+out to the controller anyway.
+
+- **`QuizAttempt` has no status column.** Its state is derived entirely
+  from two nullable timestamps: no row at all means "not started";
+  `submitted_at === null` (with a row present) means "in progress";
+  `submitted_at !== null` means "completed". This was a deliberate choice
+  over adding a redundant enum that would just have to be kept in sync
+  with those same two facts — see docs/BUSINESS_RULES.md section 7a for
+  the full state-derivation rule.
+- **One attempt, enforced at the database level.** `quiz_attempts.(quiz_id, application_id)`
+  is a unique constraint, the same "pre-check plus translated
+  `QueryException`-on-race" pattern `AssessmentService`/`Question` already
+  establish for `assessments.application_id` and `quizzes.assessment_id`.
+  `QuizController::start()` pre-checks for an existing row, and separately
+  catches the unique-violation `QueryException` a genuine concurrent
+  double-start race would produce, returning the winning attempt either
+  way rather than surfacing a raw conflict.
+- **`started_at` is schema-nullable specifically to dodge a MySQL/MariaDB
+  footgun.** With `explicit_defaults_for_timestamp` OFF (this project's
+  local server's setting), the first NOT-NULL `timestamp` column with no
+  explicit default in a table silently gets `DEFAULT CURRENT_TIMESTAMP ON
+  UPDATE CURRENT_TIMESTAMP` from MySQL itself — which would have quietly
+  bumped `started_at` forward on every later `save()` (grading writes
+  `answers`/`score`/`submitted_at` onto the same row), corrupting
+  time-limit enforcement retroactively. Application code always populates
+  it at creation regardless, so it is never actually `null` in practice —
+  see the migration's own doc comment and
+  `QuizAttemptRelationshipTest::test_started_at_does_not_change_on_a_later_save()`,
+  a direct regression guard for this exact scenario.
+- **Submit is one locked transaction.** `QuizController::submit()` opens a
+  `DB::transaction()`, immediately `lockForUpdate()`s the attempt row,
+  then checks (in order) that it exists, isn't already submitted, and
+  isn't past its time limit — each a small domain exception
+  (`QuizAttemptNotStartedException`/`QuizAlreadySubmittedException`/`QuizTimeLimitExpiredException`)
+  caught just outside the transaction and translated into its own
+  response, the same "domain exception crosses the transaction/service
+  boundary" pattern `AssessmentService`'s exceptions already establish.
+  Grading, saving the attempt, and updating the `Assessment` all happen
+  inside that same locked transaction, so a concurrent double-submit is
+  rejected the same way a simple repeat request is.
+- **Grading trusts nothing from the client except which option/value was
+  picked.** `App\Http\Requests\Student\SubmitQuizRequest` validates that
+  every quiz question is answered exactly once, with a structurally valid
+  answer for its type, entirely against the quiz's own question set
+  fetched server-side — `points`, `score`, and `correct_answer` are never
+  request fields at all. The controller then compares each submitted
+  answer to `question->correct_answer` directly (both already
+  canonicalized/validated to the same representation), sums `points` for
+  matches, and computes `round(earned / total * 100)` — PHP's default
+  round-half-away-from-zero, documented explicitly in
+  docs/BUSINESS_RULES.md so the exact behavior at `X.5` is never
+  ambiguous.
+- **`Application.status` is never written by any of `show()`/`start()`/`submit()`.**
+  It was already `in_assessment` from quiz-assessment creation (Phase
+  6B-1) and stays there through the entire attempt lifecycle and after
+  grading — only `Assessment.status`/`Assessment.result` move, mirroring
+  exactly how completing an Interview never touches `Application.status`
+  either (see the "Assessment Creation Workflow" section below).
+- **Privacy**: `App\Http\Controllers\Student\Concerns\HidesInternalQuestionFields`
+  is the Quiz/Question counterpart to `HidesInternalInterviewFields` —
+  same per-response `makeHidden()` convention (never a model-level
+  `$hidden`, so the Organization contract stays byte-for-byte unchanged),
+  reading `Question::ORGANIZATION_ONLY_FIELDS` as its single source of
+  truth rather than repeating the field name. Used from three places:
+  `Student\QuizController::show()` and both of
+  `Student\AssessmentController`'s actions (`index()`/`show()`), now that
+  they eager-load `quiz.questions` too — the exact "major regression"
+  surface the task called out explicitly.
 
 ---
 

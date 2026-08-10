@@ -327,7 +327,7 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 ## 7. Assessments
 
-Added in Phase 4A-1 as the generic entity that lets an organization choose **Interview or Quiz** (or no formal assessment) once an application is shortlisted. **As of Phase 4A-2, `type=interview` can be created through the generic endpoint below**, using the exact same shared workflow (`App\Services\AssessmentService`) as the legacy Interview endpoint (section 6). **As of Phase 6B-1, `type=quiz` creates a real `Assessment` + `Quiz` the same way**, via the sibling `AssessmentService::createQuizAssessment()` — neither type duplicates the other's transaction, status, duplicate, or validation logic. Organization Quiz authoring (adding/editing/removing questions, publishing) is documented in section 7a below. There is no student attempt/submission endpoint yet for quiz — that remains a future phase, not documented here.
+Added in Phase 4A-1 as the generic entity that lets an organization choose **Interview or Quiz** (or no formal assessment) once an application is shortlisted. **As of Phase 4A-2, `type=interview` can be created through the generic endpoint below**, using the exact same shared workflow (`App\Services\AssessmentService`) as the legacy Interview endpoint (section 6). **As of Phase 6B-1, `type=quiz` creates a real `Assessment` + `Quiz` the same way**, via the sibling `AssessmentService::createQuizAssessment()` — neither type duplicates the other's transaction, status, duplicate, or validation logic. Organization Quiz authoring (adding/editing/removing questions, publishing) and, as of Phase 6B-3, Student Quiz taking (start/submit/auto-grading) are both documented in section 7a below.
 
 An application has at most one `Assessment`. An `Assessment` has `type` (`interview` or `quiz`), `status` (`pending, scheduled, in_progress, completed, declined, cancelled`), and `result` (`null`, `pending`, `passed`, `failed`, or `waiting` — a decision not yet recorded is represented as `null`, not the string `"pending"`).
 
@@ -380,27 +380,27 @@ An application has at most one `Assessment`. An `Assessment` has `type` (`interv
 
 ### GET /api/student/assessments
 - Middleware: `auth:sanctum, active, role:student`
-- Success: 200 — every assessment belonging to the authenticated student's own applications, each with `application` and `interview` nested. The nested `interview` is filtered — see "Student-visible Interview fields" below.
+- Success: 200 — every assessment belonging to the authenticated student's own applications, each with `application` and `interview`/`quiz.questions` (whichever matches `type`) nested. The nested `interview` is filtered — see "Student-visible Interview fields" below; the nested `quiz.questions` is filtered the same way — see "Student-visible Quiz fields" in section 7a.
 - Errors: 401, 403
 
 ### GET /api/student/assessments/{assessment}
 - Same middleware
-- Success: 200 — same filtered `interview` shape as the index above.
+- Success: 200 — same filtered `interview`/`quiz.questions` shape as the index above.
 - Errors: 401, 403, 404 (assessment does not belong to this student)
 
 **Student-visible Interview fields**: `GET /api/student/assessments`, `GET /api/student/assessments/{assessment}`, and `GET /api/student/interviews` (section 6) all return `Interview` with `interviewer_email`, `company_feedback`, `rating`, and `decision` omitted — these are organization-internal (post-interview evaluation data, and a staff member's email), applied per-response via `App\Http\Controllers\Student\Concerns\HidesInternalInterviewFields`, not a model-level `$hidden`. The Organization-facing Interview/Assessment endpoints above are unaffected and continue to return every field. A student's own outcome is `assessment.result` (`null` until a real decision is recorded), not `interview.decision`.
 
-**Quiz-type assessments on the Student endpoints above**: as of Phase 6B-1, neither `GET /api/student/assessments` nor `GET /api/student/assessments/{assessment}` loads `quiz` — a `type=quiz` assessment currently returns with no quiz detail at all via these routes (not an error; the key is simply absent). This is expected, not a bug: there is no student-facing Quiz contract yet, and one is deliberately not introduced by this phase (see section 7a).
+**Quiz-type assessments on the Student endpoints above**: as of Phase 6B-3, both `GET /api/student/assessments` and `GET /api/student/assessments/{assessment}` eager-load `quiz.questions` for a `type=quiz` assessment, with `correct_answer` stripped from every question the exact same way `GET /api/student/assessments/{assessment}/quiz` (section 7a) already does — see "Student-visible Quiz fields" there. A `type=interview` assessment's `quiz` key is simply absent (not an error).
 
 ---
 
-## 7a. Quizzes (Organization Authoring — Phase 6B-1)
+## 7a. Quizzes (Organization Authoring — Phase 6B-1; Student Taking — Phase 6B-3)
 
-**Organization-only.** Viewing a quiz, adding/updating/deleting its questions while still a draft, and publishing it. **No student endpoint exists for Quiz** — viewing/starting/answering/submitting a quiz attempt is a later phase and is intentionally not documented here.
+Organization authoring: viewing a quiz, adding/updating/deleting its questions while still a draft, and publishing it. Student taking (Phase 6B-3): viewing a *published* quiz with the answer key stripped, starting the one attempt v1 allows, and submitting it for immediate auto-grading. No retake endpoint, no manual-grading endpoint, and no answer-review endpoint exist for either role.
 
 A quiz belongs to one assessment (`type=quiz`, created via section 7's generic endpoint); an assessment can have at most one quiz. A quiz has `title`, `instructions` (nullable), `time_limit_minutes` (nullable), `passing_score` (integer, 0–100), and its own `status` (`draft`/`published`, independent of `Assessment.status`). A question belongs to one quiz; it has `prompt`, `type` (`multiple_choice`/`true_false`), `options` (JSON array for `multiple_choice`, always `null` for `true_false`), `correct_answer`, `points` (default 1), and `position` (default 0).
 
-**`correct_answer` is organization-internal** — every response below includes it because the organization authored it, but it must never reach a student response (there is none yet).
+**`correct_answer` is organization-internal** — every Organization response below includes it because the organization authored it, but it is stripped from every Student response — see "Student-visible Quiz fields" below.
 
 ### GET /api/organization/assessments/{assessment}/quiz
 - Middleware: `auth:sanctum, active, role:organization`
@@ -441,6 +441,38 @@ A quiz belongs to one assessment (`type=quiz`, created via section 7's generic e
 - Preconditions: quiz belongs to the requesting organization; `quiz.status = draft` (422 `"Only draft quizzes can be published"` otherwise); at least one question exists (422 `"A quiz must have at least one question before it can be published"` otherwise). Every question is already structurally valid by construction (both create and update are gated by the same validation), so no further per-question re-validation happens here.
 - Success: 200 — sets `quiz.status = published` and `assessment.status = scheduled` in one transaction. **Does not touch `application.status`** — it is already `in_assessment` from quiz creation and stays there. Response `data` is the quiz with `questions` nested, plus `assessment.application` loaded.
 - Errors: 401, 403, 404 (`"Quiz not found"`), 422 (see preconditions above)
+
+**Student-visible Quiz fields**: every Student Quiz response below (and the nested `quiz.questions` on `GET /student/assessments`/`GET /student/assessments/{assessment}`, section 7) returns a `Question` with `correct_answer` omitted — applied per-response via `App\Http\Controllers\Student\Concerns\HidesInternalQuestionFields`, not a model-level `$hidden`, the exact same convention `HidesInternalInterviewFields` already uses for Interview. Every other Question field (`prompt`, `type`, `options`, `points`, `position`) is returned as-is. `true_false` questions return `options: null` — the same representation the Organization side already uses; the client is expected to know the two fixed choices rather than read them from the response. `Quiz.passing_score` **is** included (a deliberate v1 product decision: the passing threshold is a transparent, known-in-advance assessment rule, not a grading internal).
+
+### GET /api/student/assessments/{assessment}/quiz
+- Middleware: `auth:sanctum, active, role:student`
+- Preconditions: the assessment belongs to one of the student's own applications, `assessment.type = quiz`, a quiz exists, and `quiz.status = published`.
+- Success: 200 — the quiz with `questions` nested (ordered by `position`, then `id`), `correct_answer` omitted from each.
+- Errors: 401, 403, 404 (`"Quiz not found"` — used uniformly for "not your application", "not a quiz assessment", "no quiz yet", and "quiz still draft", deliberately never distinguishing which case applies)
+
+### POST /api/student/quizzes/{quiz}/start
+- Same middleware
+- Preconditions: the quiz belongs to one of the student's own applications; `quiz.status = published`; no *submitted* attempt already exists.
+- Success: 201 (new attempt) or 200 (an unsubmitted attempt already existed — see below) — `{"data": {"id", "quiz_id", "application_id", "started_at", "submitted_at": null, "score": null}}`.
+- **Idempotent for an in-progress attempt**: calling this again while the existing attempt is still unsubmitted returns that *same* attempt (200, message `"Quiz attempt resumed"`) rather than creating a duplicate — `started_at` is never reset and no extra time is granted. A genuine concurrent double-start race is resolved the same way, via the `quiz_attempts` unique constraint.
+- Sets `assessment.status = in_progress`. **Does not touch `application.status`**, which is already `in_assessment` and stays there.
+- Errors: 401, 403, 404 (`"Quiz not found"`), 409 (`"Quiz has already been submitted"` — a submitted attempt can never restart; no retakes in v1)
+
+### POST /api/student/quizzes/{quiz}/submit
+- Same middleware
+- Body:
+  ```json
+  {
+    "answers": [
+      { "question_id": 10, "answer": "Option A" },
+      { "question_id": 11, "answer": "True" }
+    ]
+  }
+  ```
+  Every quiz question must appear exactly once (`answers` required array; `question_id` required integer; `answer` required string). Rejected (422) for: a missing question, a duplicate `question_id`, a `question_id` not belonging to this quiz, an `answer` that isn't one of the question's own `options` (`multiple_choice`), or an `answer` that isn't `"True"`/`"False"` after canonicalization (`true_false` — `"true"`/`"TRUE"`/`"1"` and the false equivalents all normalize the same way `Organization` question authoring already does). `points`/`score`/`correct_answer` are never accepted as input.
+- Preconditions: the quiz belongs to one of the student's own applications; an attempt must already exist (`422` `"Start the quiz before submitting."` otherwise — Submit never implicitly starts); the attempt must not already be submitted; if `quiz.time_limit_minutes` is set, `now()` must not be past `attempt.started_at + time_limit_minutes` (no grace period).
+- Success: 200 — grades server-side (see docs/BUSINESS_RULES.md for the exact scoring formula and rounding rule), then atomically: `quiz_attempts.answers`/`score`/`submitted_at` are saved, and `assessment.status = completed`, `assessment.result = passed|failed`, `assessment.completed_at = now()`. **`application.status` is never touched** — it remains `in_assessment`; the organization's own accept/reject decision stays separate. Response `data` is the attempt, including `score` (now non-null) — never the correct answers.
+- Errors: 401, 403, 404 (`"Quiz not found"`), 409 (`"Quiz has already been submitted"`), 422 (validation failures above, `"Start the quiz before submitting."`, or `"Quiz time limit has expired"`)
 
 ---
 

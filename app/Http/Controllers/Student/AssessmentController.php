@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Student;
 
 use App\Http\Controllers\Controller;
 use App\Http\Controllers\Student\Concerns\HidesInternalInterviewFields;
+use App\Http\Controllers\Student\Concerns\HidesInternalQuestionFields;
 use App\Models\Assessment;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -11,6 +12,7 @@ use Illuminate\Http\Request;
 class AssessmentController extends Controller
 {
     use HidesInternalInterviewFields;
+    use HidesInternalQuestionFields;
 
     public function index(Request $request): JsonResponse
     {
@@ -28,9 +30,16 @@ class AssessmentController extends Controller
             'application.opportunity',
             'application.cv',
             'interview',
+            // As of Phase 6B-3 -- `correct_answer` is stripped from every
+            // nested question below, the same way `interview`'s
+            // organization-internal fields already are.
+            'quiz.questions',
         ])->get();
 
-        $assessments->each(fn (Assessment $assessment) => $this->hideInternalInterviewFields($assessment->interview));
+        $assessments->each(function (Assessment $assessment) {
+            $this->hideInternalInterviewFields($assessment->interview);
+            $this->hideInternalQuestionFields($assessment->quiz);
+        });
 
         return response()->json([
             'success' => true,
@@ -51,8 +60,9 @@ class AssessmentController extends Controller
             ], 404);
         }
 
-        $assessment->load(['application.opportunity', 'application.cv', 'interview']);
+        $assessment->load(['application.opportunity', 'application.cv', 'interview', 'quiz.questions']);
         $this->hideInternalInterviewFields($assessment->interview);
+        $this->hideInternalQuestionFields($assessment->quiz);
 
         return response()->json([
             'success' => true,

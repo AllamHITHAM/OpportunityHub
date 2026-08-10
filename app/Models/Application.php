@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\Relations\HasOneThrough;
 
@@ -34,6 +35,20 @@ class Application extends Model
     public function assessment(): HasOne
     {
         return $this->hasOne(Assessment::class);
+    }
+
+    /**
+     * Every quiz attempt made against this application. A direct `hasMany`
+     * on the real `quiz_attempts.application_id` column -- unlike
+     * [interview], this needs no "through" relation. v1's one-attempt rule
+     * means this holds at most one row per application in practice (the
+     * `quiz_attempts` unique constraint enforces it), but the relation
+     * itself stays a plain `hasMany` rather than an artificial `hasOne`,
+     * matching [Quiz::attempts()]'s own reasoning.
+     */
+    public function quizAttempts(): HasMany
+    {
+        return $this->hasMany(QuizAttempt::class);
     }
 
     /**

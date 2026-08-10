@@ -21,6 +21,7 @@ use App\Http\Controllers\Student\AssessmentController as StudentAssessmentContro
 use App\Http\Controllers\Student\CVController;
 use App\Http\Controllers\Student\DashboardController as StudentDashboardController;
 use App\Http\Controllers\Student\InterviewController as StudentInterviewController;
+use App\Http\Controllers\Student\QuizController as StudentQuizController;
 use App\Http\Controllers\Student\StudentProfileController;
 use App\Http\Controllers\Student\StudentSkillController;
 use Illuminate\Support\Facades\Route;
@@ -66,6 +67,10 @@ Route::middleware(['auth:sanctum', 'active', 'role:student', 'profile.exists'])-
 
     Route::get('/student/assessments', [StudentAssessmentController::class, 'index']);
     Route::get('/student/assessments/{assessment}', [StudentAssessmentController::class, 'show']);
+
+    Route::get('/student/assessments/{assessment}/quiz', [StudentQuizController::class, 'show']);
+    Route::post('/student/quizzes/{quiz}/start', [StudentQuizController::class, 'start']);
+    Route::post('/student/quizzes/{quiz}/submit', [StudentQuizController::class, 'submit']);
 
     Route::get('/student/dashboard', [StudentDashboardController::class, 'index']);
 });

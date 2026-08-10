@@ -267,13 +267,14 @@ class AssessmentMigrationTest extends TestCase
 
         Artisan::call('migrate');
 
-        // Rolls back the four most recently applied migrations: Phase 6B-1's
-        // `create_questions_table`/`create_quizzes_table` and Phase 6B-0's
-        // `add_in_assessment_status_to_applications_table` (all unrelated to
-        // `interviews`, a no-op for this assertion) and the retarget
+        // Rolls back the five most recently applied migrations: Phase
+        // 6B-3's `create_quiz_attempts_table`, Phase 6B-1's
+        // `create_questions_table`/`create_quizzes_table`, and Phase 6B-0's
+        // `add_in_assessment_status_to_applications_table` (all unrelated
+        // to `interviews`, a no-op for this assertion) and the retarget
         // migration itself. Assessments must still exist immediately after,
         // since retarget's `down()` reads from it.
-        Artisan::call('migrate:rollback', ['--step' => 4]);
+        Artisan::call('migrate:rollback', ['--step' => 5]);
 
         $interview = DB::table('interviews')->first();
         $this->assertSame($applicationId, $interview->application_id);
@@ -292,11 +293,12 @@ class AssessmentMigrationTest extends TestCase
         $this->insertLegacyInterview($applicationId);
 
         Artisan::call('migrate');
-        // Five most recently applied migrations: Phase 6B-1's
+        // Six most recently applied migrations: Phase 6B-3's
+        // `create_quiz_attempts_table`, Phase 6B-1's
         // `create_questions_table`/`create_quizzes_table`, Phase 6B-0's
         // `add_in_assessment_status_to_applications_table`, the retarget
         // migration, and `create_assessments_table` itself.
-        Artisan::call('migrate:rollback', ['--step' => 5]);
+        Artisan::call('migrate:rollback', ['--step' => 6]);
 
         $this->assertFalse(\Illuminate\Support\Facades\Schema::hasTable('assessments'));
         $this->assertTrue(\Illuminate\Support\Facades\Schema::hasColumn('interviews', 'application_id'));
@@ -305,7 +307,7 @@ class AssessmentMigrationTest extends TestCase
 
     public function test_application_id_not_null_is_enforced_after_rollback(): void
     {
-        Artisan::call('migrate:rollback', ['--step' => 4]);
+        Artisan::call('migrate:rollback', ['--step' => 5]);
 
         $this->expectException(\Illuminate\Database\QueryException::class);
 
@@ -320,7 +322,7 @@ class AssessmentMigrationTest extends TestCase
 
     public function test_application_id_foreign_key_rejects_a_nonexistent_application_after_rollback(): void
     {
-        Artisan::call('migrate:rollback', ['--step' => 4]);
+        Artisan::call('migrate:rollback', ['--step' => 5]);
 
         $this->expectException(\Illuminate\Database\QueryException::class);
 
@@ -337,7 +339,7 @@ class AssessmentMigrationTest extends TestCase
     {
         $applicationId = $this->seedApplication();
 
-        Artisan::call('migrate:rollback', ['--step' => 4]);
+        Artisan::call('migrate:rollback', ['--step' => 5]);
 
         DB::table('interviews')->insert([
             'application_id' => $applicationId,
@@ -361,14 +363,15 @@ class AssessmentMigrationTest extends TestCase
     /**
      * Rolls back the retarget migration (plus every later, unrelated
      * migration stacked on top of it since -- Phase 6B-0's
-     * `add_in_assessment_status_to_applications_table` and Phase 6B-1's
-     * `create_quizzes_table`/`create_questions_table` -- all no-ops for
-     * `interviews`), returning the schema to its pre-Phase-4A-1 shape so a
-     * legacy `interviews.application_id` row can be seeded.
+     * `add_in_assessment_status_to_applications_table`, Phase 6B-1's
+     * `create_quizzes_table`/`create_questions_table`, and Phase 6B-3's
+     * `create_quiz_attempts_table` -- all no-ops for `interviews`),
+     * returning the schema to its pre-Phase-4A-1 shape so a legacy
+     * `interviews.application_id` row can be seeded.
      */
     private function rollBackRetargetMigrations(): void
     {
-        Artisan::call('migrate:rollback', ['--step' => 4]);
+        Artisan::call('migrate:rollback', ['--step' => 5]);
     }
 
     private function insertLegacyInterview(int $applicationId, array $overrides = []): int

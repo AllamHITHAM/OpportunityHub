@@ -34,6 +34,18 @@ class Quiz extends Model
         return $this->hasMany(Question::class)->orderBy('position')->orderBy('id');
     }
 
+    /**
+     * Every attempt at this quiz. A plain `hasMany`, not a scoped/awkward
+     * "the current application's attempt" relation -- v1's one-attempt-per-
+     * application rule is enforced by the `quiz_attempts` unique constraint
+     * (see the migration) and application-level lookups
+     * (`Student\QuizController`), not by the shape of this relation.
+     */
+    public function attempts(): HasMany
+    {
+        return $this->hasMany(QuizAttempt::class);
+    }
+
     protected function casts(): array
     {
         return [
