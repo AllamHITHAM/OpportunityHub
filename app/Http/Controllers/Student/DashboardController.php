@@ -24,7 +24,12 @@ class DashboardController extends Controller
             'rejected_applications' => (clone $applications)->where('status', 'rejected')->count(),
             'total_cvs' => $studentProfile->cvs()->count(),
             'total_skills' => $studentProfile->studentSkills()->count(),
-            'total_interviews' => Interview::whereHas('application', function ($query) use ($studentProfile) {
+            // `Interview` has no direct `application()` *relation* (only a
+            // read-only `application` Attribute accessor for JSON
+            // serialization -- see Interview.php) since the Phase 4A-1
+            // Assessment retarget. The real, queryable chain is
+            // `interview -> assessment -> application`.
+            'total_interviews' => Interview::whereHas('assessment.application', function ($query) use ($studentProfile) {
                 $query->where('student_id', $studentProfile->id);
             })->count(),
         ];

@@ -11,6 +11,7 @@ use App\Http\Controllers\Organization\ApplicationController as OrganizationAppli
 use App\Http\Controllers\Organization\AssessmentController as OrganizationAssessmentController;
 use App\Http\Controllers\Organization\DashboardController as OrganizationDashboardController;
 use App\Http\Controllers\Organization\InterviewController as OrganizationInterviewController;
+use App\Http\Controllers\Organization\OfferController as OrganizationOfferController;
 use App\Http\Controllers\Organization\OpportunityController;
 use App\Http\Controllers\Organization\OpportunitySkillController;
 use App\Http\Controllers\Organization\OrganizationProfileController;
@@ -21,6 +22,7 @@ use App\Http\Controllers\Student\AssessmentController as StudentAssessmentContro
 use App\Http\Controllers\Student\CVController;
 use App\Http\Controllers\Student\DashboardController as StudentDashboardController;
 use App\Http\Controllers\Student\InterviewController as StudentInterviewController;
+use App\Http\Controllers\Student\OfferController as StudentOfferController;
 use App\Http\Controllers\Student\QuizController as StudentQuizController;
 use App\Http\Controllers\Student\StudentProfileController;
 use App\Http\Controllers\Student\StudentSkillController;
@@ -72,6 +74,10 @@ Route::middleware(['auth:sanctum', 'active', 'role:student', 'profile.exists'])-
     Route::post('/student/quizzes/{quiz}/start', [StudentQuizController::class, 'start']);
     Route::post('/student/quizzes/{quiz}/submit', [StudentQuizController::class, 'submit']);
 
+    Route::get('/student/applications/{application}/offer', [StudentOfferController::class, 'show']);
+    Route::put('/student/offers/{offer}/accept', [StudentOfferController::class, 'accept']);
+    Route::put('/student/offers/{offer}/decline', [StudentOfferController::class, 'decline']);
+
     Route::get('/student/dashboard', [StudentDashboardController::class, 'index']);
 });
 
@@ -113,6 +119,9 @@ Route::middleware(['auth:sanctum', 'active', 'role:organization'])->group(functi
 
     Route::post('/organization/applications/{application}/analyze', [ApplicationAnalysisController::class, 'analyze']);
     Route::get('/organization/applications/{application}/analysis', [ApplicationAnalysisController::class, 'show']);
+
+    Route::post('/organization/applications/{application}/offer', [OrganizationOfferController::class, 'store']);
+    Route::get('/organization/applications/{application}/offer', [OrganizationOfferController::class, 'show']);
 
     Route::get('/organization/dashboard', [OrganizationDashboardController::class, 'index']);
 });

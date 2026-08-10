@@ -52,15 +52,15 @@
   - rejected
   - withdrawn
 - Match score is calculated after application submission.
-- **As of Phase 6C-0, `accepted` means specifically "the student accepted the Offer."** It is no longer organization-writable through the generic status endpoint — the only workflow permitted to set it is the future `Student\OfferController::accept()` (Phase 6C-1). Since no Offer workflow exists yet, `accepted` is **temporarily unreachable through any normal API action** after this phase — this is intentional, not a bug, and no temporary replacement endpoint was added. Pre-existing `accepted` rows are untouched and remain fully valid, legacy-compatible data; the semantics shift only governs *new* writes going forward.
-- `rejected` continues to mean the hiring process ended negatively (the organization declined the candidate, at any appropriate stage — see section 3 and section 7). It remains directly organization-writable through the generic status endpoint, unchanged by Phase 6C-0. A rejected application is not automatically re-openable — reversing one requires a manual data change, not an API action; this is a stated rule, not one enforced by the API.
+- **As of Phase 6C-0, `accepted` means specifically "the student accepted the Offer."** It is no longer organization-writable through the generic status endpoint — the only workflow permitted to set it is `Student\OfferController::accept()` (`App\Services\OfferService::acceptOffer()`, Phase 6C-1 — see section 7b). Pre-existing `accepted` rows from before Phase 6C-0 are untouched and remain fully valid, legacy-compatible data; the semantics shift only governs writes going forward.
+- `rejected` continues to mean the hiring process ended negatively — either the organization declined the candidate directly at any appropriate stage (section 3, section 7), or the student declined a sent Offer (`Student\OfferController::decline()`, section 7b). Both converge on the same `Application.status = rejected`; only the actor and, for the Offer case, `Offer.status = declined` distinguish which happened — see section 7b. It remains directly organization-writable through the generic status endpoint. A rejected application is not automatically re-openable — reversing one requires a manual data change, not an API action; this is a stated rule, not one enforced by the API.
 - A withdrawn application is controlled by the student; once `withdrawn`, no further status change is accepted from any source (`409`).
-- **`application.status` owns recruitment progress only** (Phase 4A-1 decision, reaffirmed by Phase 6B-0 and Phase 6C-0). It does not, and must not, describe assessment-path/assessment-outcome detail (that belongs to `assessment.status`/`assessment.result`, see section 7) or Offer-specific detail (that will belong to `offer.status`, Phase 6C-1) — it only ever tracks the overall stage the application itself is at.
+- **`application.status` owns recruitment progress only** (Phase 4A-1 decision, reaffirmed by Phase 6B-0 and Phase 6C-0/6C-1). It does not, and must not, describe assessment-path/assessment-outcome detail (that belongs to `assessment.status`/`assessment.result`, see section 7) or Offer-specific detail (that belongs to `offer.status`, see section 7b) — it only ever tracks the overall stage the application itself is at.
 - **`in_assessment` (Phase 6B-0) is the generic application-level status meaning "an active evaluation exists for this application."** It is set exactly once, by `AssessmentService::transitionToInAssessment()`, whenever a real `Assessment` is created — for both `type=interview` and `type=quiz`, without introducing a second status per type. It can never be set directly through the generic `PUT /api/organization/applications/{application}/status` endpoint — it must always be the byproduct of a real Assessment-creation workflow (see section 7 and docs/API.md section 5).
-- **`offer_sent` (Phase 6C-0) is the new generic application-level status meaning "the organization has sent a final Offer, and the student's response is pending."** It is reserved for the future `OfferService::sendOffer()` (Phase 6C-1) to write — Phase 6C-0 only adds the value to the database enum and API response contract; nothing in the codebase writes it yet. Like `in_assessment`, it can never be set directly through the generic status endpoint.
-- **`interview_scheduled` is deprecated, legacy-compatibility-only.** Before Phase 6B-0, assessment creation wrote this value instead of a generic one; it remains a valid, readable `application.status` for pre-existing records (and is still an accepted *source* status for creating an assessment, so an old application stuck at `interview_scheduled` with no real Assessment can still receive one — see section 7). It can no longer be set through the generic status endpoint, and no code path writes it going forward — new Assessment creation always writes `in_assessment` instead.
-- **The generic organization status endpoint may set only `reviewed`, `shortlisted`, or `rejected`.** As of Phase 6C-0 it can no longer set `accepted` (see above) — combined with the pre-existing exclusions of `in_assessment`, `offer_sent`, and `interview_scheduled`, this endpoint is now purely for early-funnel screening moves and rejection; every other transition is the byproduct of a real domain workflow (Assessment creation, the future Offer workflow).
-- **Responsibility boundaries across the assessment/offer stack** (Phase 6B-0, extended Phase 6C-0): `Application.status` owns recruitment progress and the two generic "a workflow is active" signals (`in_assessment`, `offer_sent`); `Assessment.type` identifies which kind of evaluation is active (`interview`/`quiz`); `Assessment.status`/`Assessment.result` own the generic evaluation lifecycle/outcome shared by every assessment type; `Interview.status`/`Quiz.status` own their own type-specific state; a future `Offer.status` (Phase 6C-1) will own Offer-specific state (`sent`/`accepted`/`declined`) the same way, without `Application.status` ever needing more than its own two generic signals plus the final `accepted`/`rejected` outcome.
+- **`offer_sent` is the generic application-level status meaning "the organization has sent a final Offer, and the student's response is pending."** It is written from exactly one place — `OfferService::sendOffer()` (Phase 6C-1, section 7b) — whenever an `in_assessment` application with a completed Assessment receives an Offer. Like `in_assessment`, it can never be set directly through the generic status endpoint.
+- **`interview_scheduled` is deprecated, legacy-compatibility-only.** Before Phase 6B-0, assessment creation wrote this value instead of a generic one; it remains a valid, readable `application.status` for pre-existing records (and is still an accepted *source* status for creating an assessment, so an old application stuck at `interview_scheduled` with no real Assessment can still receive one — see section 7). It can no longer be set through the generic status endpoint, and no code path writes it going forward — new Assessment creation always writes `in_assessment` instead. It is also never treated as equivalent to `in_assessment` for Offer eligibility — see section 7b.
+- **The generic organization status endpoint may set only `reviewed`, `shortlisted`, or `rejected`.** As of Phase 6C-0 it can no longer set `accepted` (see above) — combined with the pre-existing exclusions of `in_assessment`, `offer_sent`, and `interview_scheduled`, this endpoint is now purely for early-funnel screening moves and rejection; every other transition is the byproduct of a real domain workflow (Assessment creation, section 7; the Offer workflow, section 7b).
+- **Responsibility boundaries across the assessment/offer stack** (Phase 6B-0, extended Phase 6C-0/6C-1): `Application.status` owns recruitment progress and the two generic "a workflow is active" signals (`in_assessment`, `offer_sent`); `Assessment.type` identifies which kind of evaluation is active (`interview`/`quiz`); `Assessment.status`/`Assessment.result` own the generic evaluation lifecycle/outcome shared by every assessment type; `Interview.status`/`Quiz.status` own their own type-specific state; `Offer.status` (`sent`/`accepted`/`declined`, section 7b) owns Offer-specific state the same way, without `Application.status` ever needing more than its own two generic signals plus the final `accepted`/`rejected` outcome.
 
 ## 6. Interview Rules
 
@@ -113,6 +113,83 @@ The student workflow: **published quiz → start → attempt in progress → sub
 - **Submit without Start is rejected**, not implicitly treated as a fresh start — `422` (`"Start the quiz before submitting."`). Phase 6B-3 deliberately keeps Start and Submit as two distinct, required steps.
 - **`Application.status` is never touched by grading.** It remains `in_assessment` after a quiz is submitted and graded, exactly like it does after an interview is completed (section 6) — the final accepted/rejected decision always stays a separate, organization-triggered action via the existing status endpoint, never automatic from a quiz result.
 
+## 7b. Offer Rules (Phase 6C-1)
+
+The final hiring decision. An Offer is the organization's own final action on
+an `in_assessment` application with a completed Assessment; the student's
+accept/decline response is the application's own final action in turn. Owned
+end-to-end by `App\Services\OfferService`, the same "one service owns every
+multi-model transition" doctrine `AssessmentService` already established.
+
+- **One Offer per Application**, enforced by a database unique constraint
+  (`offers.application_id`) — the same one-per-application shape `Assessment`
+  already uses.
+- **An Offer has a `status`: `sent`, `accepted`, or `declined`.** No `draft`
+  (an Offer is created and sent in one organization action — no multi-step
+  authoring to protect against, unlike Quiz), no `expired` (v1 has no
+  automatic expiry, and therefore no `expires_at` field either — an Offer
+  stays `sent` indefinitely until the student responds), and no `cancelled`
+  (v1 gives the organization no way to rescind a sent Offer). Every Offer's
+  entire lifecycle is: created `sent`, then terminates exactly once via
+  accept or decline. None of this is enforced by a background job or
+  scheduled task — there is nothing time-based to enforce.
+- **Send-offer eligibility**: `application.status` must be exactly
+  `in_assessment`, and its Assessment must exist and have
+  `status = completed`. `pending`/`reviewed`/`shortlisted` (no assessment
+  reached yet), `offer_sent`/`accepted`/`rejected`/`withdrawn` (past this
+  stage already), and legacy `interview_scheduled` (never itself
+  `in_assessment`, even with a completed Assessment attached — see section
+  5) are all rejected with `422`. An `in_assessment` application whose
+  Assessment is still `pending`/`scheduled`/`in_progress` (or, defensively,
+  missing entirely) is likewise rejected with `422`.
+- **`Assessment.result` is informational only and never gates sending an
+  Offer.** `passed`, `failed`, `waiting`, and no result at all (`null`) are
+  all equally eligible — the organization retains final hiring authority;
+  a completed Assessment (regardless of outcome) is the only precondition.
+  This is a deliberate business decision, not an oversight: a candidate who
+  fails a quiz might still be the right hire on other merits, and the
+  reverse (a passing result) never *obligates* an offer either.
+- **Sending an Offer sets `Application.status = offer_sent`** in the same
+  transaction that creates the Offer (`status = sent`, `sent_at = now()`) —
+  written from exactly one place, `OfferService::sendOffer()`. Neither
+  `Assessment.status` nor `Assessment.result` is touched by this or any
+  later Offer transition.
+- **The student accepts or declines exactly once.** Accepting sets
+  `Offer.status = accepted`, `responded_at = now()`, and
+  `Application.status = accepted`. Declining sets `Offer.status = declined`,
+  `responded_at = now()`, and `Application.status = rejected` — the same
+  final status a direct organization rejection produces (section 5); only
+  the actor and `Offer.status` distinguish which happened. Both transitions
+  lock the Offer row (`lockForUpdate()`) for the duration of the response
+  transaction, so a genuine concurrent double-response (two accepts, two
+  declines, or an accept racing a decline) always has exactly one winner —
+  the second read finds `status` no longer `sent` and fails with `409`,
+  never producing a state where `Offer.status` and `Application.status`
+  disagree (e.g. Offer `accepted` alongside Application `rejected`).
+- **No re-response.** Neither accept nor decline may be called again once
+  the Offer has already been responded to, regardless of which response
+  "won" — `409`.
+- **Compensation fields are optional but internally consistent.** An Offer
+  with no compensation terms at all is valid v1 data (e.g. an unpaid/
+  volunteer role). If `salary_amount` is provided, `salary_currency` and
+  `salary_period` (`hourly`/`monthly`/`yearly`) are both required; either of
+  those being supplied without `salary_amount` is rejected the same way —
+  never a silently-incomplete compensation shape.
+- **`start_date`, if provided, must be today or a future date** — a start
+  date already in the past would never make sense for an Offer that hasn't
+  been accepted yet.
+- **All v1 Offer fields are student-visible** on the student's own Offer —
+  there is no organization-internal-only field (no `internal_notes`), so no
+  field-hiding is needed the way `Question.correct_answer`/`Interview`'s
+  organization-only fields are hidden from students elsewhere in this app.
+  A student may only ever see their own Offer; an organization may only ever
+  see Offers for its own opportunities — both enforced the same uniform
+  "404, never revealing which case applies" way every other ownership check
+  in this app already is.
+- **No update/delete/cancel/resend action exists for an Offer in v1** — once
+  sent, its terms are immutable, and its only two possible futures are
+  accepted or declined.
+
 ## 8. Notification Rules
 
 - Notifications belong to users.
@@ -126,6 +203,7 @@ The student workflow: **published quiz → start → attempt in progress → sub
 - Users can mark notifications as read.
 - Notifications can have a priority level (low, normal, high) and record the timestamp they were sent.
 - **Not yet implemented as of Phase 4A-1**: no code path creates a `Notification` row for any of the examples above (including assessment-related events) — only reading and marking-as-read are implemented. Deferred to a later phase.
+- **Phase 6C-1 future attachment points**: `OfferService::sendOffer()`/`acceptOffer()`/`declineOffer()` are each a single, already-transactional call site — the natural place a future notification dispatch (offer sent → student; offer accepted/declined → organization) would attach, one call each, inside the same transaction. No event/listener infrastructure or notification-creation code was added in Phase 6C-1 itself.
 
 ## 9. AI Matching Rules
 

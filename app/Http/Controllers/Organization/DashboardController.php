@@ -19,7 +19,12 @@ class DashboardController extends Controller
         $applications = Application::whereHas('opportunity', function ($query) use ($organizationId) {
             $query->where('organization_id', $organizationId);
         });
-        $interviews = Interview::whereHas('application.opportunity', function ($query) use ($organizationId) {
+        // `Interview` has no direct `application()` *relation* (only a
+        // read-only `application` Attribute accessor for JSON
+        // serialization -- see Interview.php) since the Phase 4A-1
+        // Assessment retarget. The real, queryable chain is
+        // `interview -> assessment -> application -> opportunity`.
+        $interviews = Interview::whereHas('assessment.application.opportunity', function ($query) use ($organizationId) {
             $query->where('organization_id', $organizationId);
         });
 

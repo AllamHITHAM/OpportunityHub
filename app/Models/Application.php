@@ -38,6 +38,16 @@ class Application extends Model
     }
 
     /**
+     * The organization's final Offer for this application (Phase 6C-1) --
+     * at most one, enforced by the `offers.application_id` unique
+     * constraint, matching [assessment]'s own one-per-application shape.
+     */
+    public function offer(): HasOne
+    {
+        return $this->hasOne(Offer::class);
+    }
+
+    /**
      * Every quiz attempt made against this application. A direct `hasMany`
      * on the real `quiz_attempts.application_id` column -- unlike
      * [interview], this needs no "through" relation. v1's one-attempt rule

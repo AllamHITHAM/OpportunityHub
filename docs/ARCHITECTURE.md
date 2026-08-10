@@ -109,6 +109,7 @@ shared shape:
 ```
 Application
   hasOne Assessment
+  hasOne Offer            (Phase 6C-1)
   hasMany QuizAttempt    (Phase 6B-3)
 
 Assessment
@@ -127,17 +128,22 @@ Question                  (Phase 6B-1)
 QuizAttempt               (Phase 6B-3)
   belongsTo Quiz
   belongsTo Application
+
+Offer                      (Phase 6C-1)
+  belongsTo Application
 ```
 
 - `Application` owns recruitment lifecycle only (`status`: pending,
   reviewed, shortlisted, in_assessment, offer_sent, interview_scheduled,
   accepted, rejected, withdrawn). As of Phase 6B-0, `in_assessment` is the
   generic value written whenever a real Assessment exists (interview or
-  quiz); as of Phase 6C-0, `offer_sent` is the generic value reserved for
-  the future Offer workflow (Phase 6C-1) to write, and `accepted` means
-  specifically "the student accepted the Offer" rather than merely "the
-  organization chose this candidate"; `interview_scheduled` is deprecated
-  legacy-compatibility only — see docs/BUSINESS_RULES.md section 5.
+  quiz); as of Phase 6C-1, `offer_sent` is written by
+  `OfferService::sendOffer()`, and `accepted`/`rejected` (when reached via
+  an Offer response) are written by `OfferService::acceptOffer()`/
+  `declineOffer()` — `accepted` means specifically "the student accepted
+  the Offer" rather than merely "the organization chose this candidate";
+  `interview_scheduled` is deprecated legacy-compatibility only — see
+  docs/BUSINESS_RULES.md section 5.
 - `Assessment` owns the shared assessment lifecycle: `type` (`interview` |
   `quiz`), `status`, `result`, `completed_at`.
 - `Interview` owns interview-specific scheduling/outcome detail
@@ -491,8 +497,133 @@ full narrative and docs/API.md section 5 for the endpoint contract.
   meaning for any *new* data going forward. No `offer_sent_applications`
   field was added — deferred to Phase 6C-4, once the Offer feature exists
   to make such a count meaningful.
-- Offer tables/models/controllers are still not implemented — this phase
-  only prepares `Application.status` to be Offer-ready.
+- Offer tables/models/controllers were not implemented in Phase 6C-0 — that
+  phase only prepared `Application.status` to be Offer-ready. **Phase 6C-1
+  (below) has since implemented the full Offer feature**, so `accepted`/
+  `offer_sent` are no longer unreachable.
+
+---
+
+## Offer Foundation Architecture (Phase 6C-1)
+
+The final hiring decision: `App\Services\OfferService` sending an Offer,
+and the student accepting or declining it. Owned end-to-end by one service,
+the same doctrine `AssessmentService` already established for Assessment
+creation — no multi-model transition logic lives in a controller. See
+docs/BUSINESS_RULES.md section 7b for the full business-rule narrative and
+docs/API.md section 7b for the endpoint contracts.
+
+- **`Offer`** (new model/table) `belongsTo Application`; `Application`
+  gains a matching `hasOne Offer` alongside its existing `hasOne
+  Assessment` — the same one-per-application shape, enforced the same way
+  (`offers.application_id` unique + cascade delete).
+- **`$fillable` includes `status`/`sent_at`/`responded_at`**, not just the
+  organization-authored terms — matching this codebase's own
+  `Assessment`/`QuizAttempt` precedent (both list every column a service
+  ever mass-assigns, not just what an HTTP client may directly supply). The
+  actual write boundary is enforced one layer up: only `OfferService` ever
+  sets those three columns; `SendOfferRequest`'s validated data never
+  contains them.
+- **`OfferService::sendOffer(Application, array): Offer`** — pre-checks no
+  existing Offer (`assertNoExistingOffer()`) and eligibility
+  (`assertEligibleForOffer()`: `application.status === 'in_assessment'`
+  and its Assessment `status === 'completed'` — never `result`, which is
+  deliberately never inspected), then creates the Offer (`status=sent`,
+  `sent_at=now()`) and sets `application.status = offer_sent`, in one
+  transaction. A concurrent double-send is caught the same way
+  `AssessmentService::createInterviewAssessment()` already catches a
+  concurrent double-assessment: a `QueryException` on the
+  `offers_application_id_unique` constraint is translated to
+  `OfferAlreadyExistsException` by `isDuplicateOfferViolation()`, the exact
+  same pattern as `isDuplicateAssessmentViolation()`.
+- **`OfferService::acceptOffer(Offer)` / `declineOffer(Offer)`** share a
+  private `respondToOffer()` that locks the Offer row (`lockForUpdate()`,
+  the same discipline `Student\QuizController::submit()` already uses for
+  its own once-only transition) before checking `status === 'sent'`, then
+  updates both `Offer.status`/`responded_at` and `Application.status`
+  (`accepted` or `rejected`) inside that same locked transaction. This is
+  what guarantees the two can never diverge into an impossible combination
+  (e.g. Offer `accepted` alongside Application `rejected`) even under a
+  genuine concurrent accept-vs-decline race — whichever transaction commits
+  first wins; the second re-reads `status` as no longer `sent` and throws
+  `OfferAlreadyRespondedException` instead of overwriting the first
+  response.
+- **Three new domain exceptions**, mirroring the Assessment exceptions'
+  shape exactly (plain `Exception` subclasses, a default message,
+  constructor-overridable): `OfferAlreadyExistsException` (409),
+  `InvalidOfferSourceStatusException` (422 — reused for all three distinct
+  "not eligible yet" cases: wrong application status, no Assessment, or an
+  incomplete Assessment, each with its own message at the throw site,
+  rather than three separate exception classes), and
+  `OfferAlreadyRespondedException` (409).
+- **`Organization\OfferController`** (`store`/`show`) and
+  **`Student\OfferController`** (`show`/`accept`/`decline`) both stay thin
+  — ownership check, delegate to `OfferService`, translate the outcome into
+  the shared response envelope — exactly like every other controller in
+  this codebase. Neither exposes update/delete/cancel/resend; v1's Offer is
+  immutable once sent.
+- **Response shape never nests `application`.** Every Offer-returning
+  response is the Offer's own fields only (see docs/API.md section 7b) —
+  deliberately never eager-loading/serializing the parent `Application`
+  alongside it, even though `Student\OfferController::accept()`/
+  `decline()` need to read `offer.application.student_id` for the
+  ownership check. That lazy read never touches the *response* object:
+  `OfferService::respondToOffer()` re-fetches a clean `Offer` instance
+  (via the row lock) that never had `application` loaded in the first
+  place, so there is nothing to accidentally leak.
+- **Pre-existing, unrelated bug discovered while testing this phase, since
+  fixed** (see "Dashboard Interview Query Fix" below): `GET
+  /api/organization/dashboard` and `GET /api/student/dashboard` both used
+  to 500 on every call — `Organization\DashboardController`/
+  `Student\DashboardController` called `Interview::whereHas('application...',
+  ...)`, but `Interview` has had no real `application()` *relation* since
+  the Phase 4A-1 retarget migration (only a read-only `application`
+  *Attribute accessor*, which `whereHas()` cannot use). Neither dashboard
+  endpoint had any test coverage before Phase 6C-1, so this was never
+  caught before then. It was out of scope for Offer Foundation itself, so
+  it was flagged rather than fixed in this phase — the fix landed as its
+  own follow-up.
+
+---
+
+## Dashboard Interview Query Fix (post-Phase 6C-1)
+
+Fixes the pre-existing bug flagged in "Offer Foundation Architecture (Phase
+6C-1)" above — `GET /api/organization/dashboard` and `GET
+/api/student/dashboard` both 500ing on every call, entirely unrelated to
+Offers.
+
+- **Root cause**: both `Organization\DashboardController`/
+  `Student\DashboardController` queried `Interview::whereHas('application',
+  ...)` (organization: `'application.opportunity'`). `Interview` has had no
+  real `application()` Eloquent *relation* since the Phase 4A-1 Assessment
+  retarget — only a read-only `application` *Attribute accessor*
+  (`protected function application(): Attribute`, for backward-compatible
+  JSON serialization only — see `Interview.php`), which `whereHas()` cannot
+  resolve.
+- **Fix**: both controllers now query the real, current relationship chain
+  — `interview -> assessment -> application` (`Assessment belongsTo
+  Application`, `Interview belongsTo Assessment`, both real relations).
+  Organization: `Interview::whereHas('assessment.application.opportunity',
+  ...)`. Student: `Interview::whereHas('assessment.application', ...)`.
+  Laravel's dot-notation `whereHas()` nests through any number of real
+  relations, so no intermediate model needed a new method.
+- **No fake/duplicate `application()` relationship was added back onto
+  `Interview`** — the existing Attribute accessor stays exactly as-is (it's
+  still needed for the legacy top-level `data.application` JSON shape on
+  Interview responses); only the dashboard queries changed, to use the
+  relation chain that has been canonical since Phase 4A-1.
+- **Response contract unchanged.** Every dashboard field name, response
+  envelope, and value semantics are identical to before the fix — this was
+  purely a query-path correction, not a feature change. No
+  `offer_sent_applications` field was added.
+- **Real end-to-end test coverage added**: `tests/Feature/Organization/OrganizationDashboardTest.php`
+  and `tests/Feature/Student/StudentDashboardTest.php` both call the actual
+  `GET` endpoints (not the query in isolation), covering the 200/envelope
+  case, exact interview counts, cross-organization/cross-student isolation,
+  a zero baseline, the other existing counts, and the pre-existing
+  auth/role/active/profile-exists middleware behavior. Neither dashboard
+  endpoint had any test coverage before this fix.
 
 ---
 
@@ -529,6 +660,13 @@ Future versions may integrate LLM APIs.
 Notifications are stored in the database.
 
 Flutter will fetch them through REST API.
+
+**Future attachment points (Phase 6C-1):** `OfferService::sendOffer()` /
+`acceptOffer()` / `declineOffer()` are each a single, already-transactional
+call site — the natural place a future notification dispatch (Offer sent →
+student; Offer accepted/declined → organization) would attach. No
+event/listener infrastructure or notification-creation code exists yet;
+this is a pointer for a later phase, not something Phase 6C-1 implements.
 
 ---
 

@@ -250,7 +250,7 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 ### PUT /api/organization/applications/{application}/status
 - Same middleware
-- Body: `status` (required, in: reviewed, shortlisted, rejected — **not** `pending`/`withdrawn`). **As of Phase 6B-0, `in_assessment` and `interview_scheduled` are no longer accepted here**, and **as of Phase 6C-0, `accepted` and `offer_sent` are no longer accepted here either** — `in_assessment` and `offer_sent` must only ever be reached through their real domain workflow (Assessment creation, section 7; the future Offer workflow, Phase 6C-1), `interview_scheduled` (deprecated legacy value) can no longer be fabricated with no assessment behind it, and `accepted` now means specifically "the student accepted the Offer" (only the future `Student\OfferController::accept()` may write it — see docs/BUSINESS_RULES.md section 5). Any of these four values in the request body now fails standard `in:` validation (422). Existing rows may still legitimately hold any of them — this restriction is on input only, never on what's stored or returned (see the response note below). `accepted` is consequently unreachable through any current API action until the Offer workflow (Phase 6C-1) exists — intentional, not a bug.
+- Body: `status` (required, in: reviewed, shortlisted, rejected — **not** `pending`/`withdrawn`). **As of Phase 6B-0, `in_assessment` and `interview_scheduled` are no longer accepted here**, and **as of Phase 6C-0, `accepted` and `offer_sent` are no longer accepted here either** — `in_assessment` and `offer_sent` must only ever be reached through their real domain workflow (Assessment creation, section 7; the Offer workflow, section 7b), `interview_scheduled` (deprecated legacy value) can no longer be fabricated with no assessment behind it, and `accepted` now means specifically "the student accepted the Offer" (only `Student\OfferController::accept()`, section 7b, may write it — see docs/BUSINESS_RULES.md section 5). Any of these four values in the request body now fails standard `in:` validation (422). Existing rows may still legitimately hold any of them — this restriction is on input only, never on what's stored or returned (see the response note below).
 - Success: 200 — also sets `reviewed_at = now()` on every successful call, even if re-setting the same status.
 - Errors: 401, 403, 404, 409 ("Cannot change the status of a withdrawn application"), 422
 
@@ -473,6 +473,94 @@ A quiz belongs to one assessment (`type=quiz`, created via section 7's generic e
 - Preconditions: the quiz belongs to one of the student's own applications; an attempt must already exist (`422` `"Start the quiz before submitting."` otherwise — Submit never implicitly starts); the attempt must not already be submitted; if `quiz.time_limit_minutes` is set, `now()` must not be past `attempt.started_at + time_limit_minutes` (no grace period).
 - Success: 200 — grades server-side (see docs/BUSINESS_RULES.md for the exact scoring formula and rounding rule), then atomically: `quiz_attempts.answers`/`score`/`submitted_at` are saved, and `assessment.status = completed`, `assessment.result = passed|failed`, `assessment.completed_at = now()`. **`application.status` is never touched** — it remains `in_assessment`; the organization's own accept/reject decision stays separate. Response `data` is the attempt, including `score` (now non-null) — never the correct answers.
 - Errors: 401, 403, 404 (`"Quiz not found"`), 409 (`"Quiz has already been submitted"`), 422 (validation failures above, `"Start the quiz before submitting."`, or `"Quiz time limit has expired"`)
+
+---
+
+## 7b. Offers (Phase 6C-1)
+
+The final hiring decision, owned end-to-end by `App\Services\OfferService`.
+An application has at most one Offer, addressed either by Application ID
+(`GET .../applications/{application}/offer`, both roles) or by its own
+Offer ID (`PUT /api/student/offers/{offer}/accept|decline`). See
+docs/BUSINESS_RULES.md section 7b for the full eligibility/response
+narrative.
+
+An Offer's fields: `id`, `application_id`, `title` (nullable string),
+`salary_amount` (nullable, serializes as a two-decimal string, e.g.
+`"90000.00"`), `salary_currency` (nullable string), `salary_period`
+(nullable, one of `hourly`/`monthly`/`yearly`), `start_date` (nullable,
+serializes as a full ISO datetime at midnight UTC, e.g.
+`"2026-09-01T00:00:00.000000Z"` — a real Eloquent `date`-cast quirk, not a
+bare `Y-m-d` string), `message` (nullable string), `status` (`sent`,
+`accepted`, or `declined`), `sent_at`, `responded_at` (nullable until
+responded to), `created_at`, `updated_at`. No `expires_at`, no
+`internal_notes`, no cancellation-related field — see
+docs/BUSINESS_RULES.md section 7b for why each was deliberately left out
+of v1.
+
+### POST /api/organization/applications/{application}/offer
+- Middleware: `auth:sanctum, active, role:organization`
+- Body: `title` (nullable, string, max:255); `salary_amount` (nullable,
+  numeric, min:0 — required if `salary_currency` or `salary_period` is
+  present); `salary_currency` (nullable, string, max:10 — required if
+  `salary_amount` is present); `salary_period` (nullable, in:
+  hourly,monthly,yearly — required if `salary_amount` is present);
+  `start_date` (nullable, date, `after_or_equal:today`); `message`
+  (nullable, string, max:2000). Every field may be omitted entirely — an
+  Offer with no compensation terms at all is valid v1 data.
+- Preconditions: the application belongs to this organization (404
+  otherwise); `application.status === 'in_assessment'`, the application has
+  an Assessment, and that Assessment's `status === 'completed'` (422
+  otherwise — `assessment.result` is never checked, see
+  docs/BUSINESS_RULES.md); no Offer already exists for this application
+  (409 otherwise).
+- Success: 201 — creates the Offer (`status = sent`, `sent_at = now()`) and
+  sets `application.status = offer_sent`, in one transaction. Response
+  `data` is the Offer, in the shape above.
+- Errors: 401, 403, 404 (`"Application not found"`), 409 (`"An offer
+  already exists for this application."`), 422 (validation failures above,
+  or `"This application is not eligible to receive an offer."` /
+  `"An offer can only be sent once the assessment is completed."`)
+
+### GET /api/organization/applications/{application}/offer
+- Same middleware
+- Preconditions: the application belongs to this organization (404
+  otherwise).
+- Success: 200 — the Offer, in the shape above.
+- Errors: 401, 403, 404 (`"Application not found"`, or `"This application
+  has no offer yet"` if the application is owned but has none)
+
+### GET /api/student/applications/{application}/offer
+- Middleware: `auth:sanctum, active, role:student`
+- Preconditions: the application belongs to this student.
+- Success: 200 — the Offer, in the shape above (every field is
+  student-visible — there is no organization-only field to hide, see
+  docs/BUSINESS_RULES.md section 7b).
+- Errors: 401, 403, 404 (`"Offer not found"` — used uniformly for "not your
+  application" and "no offer yet", deliberately never distinguishing which
+  case applies)
+
+### PUT /api/student/offers/{offer}/accept
+- Same middleware
+- Preconditions: the Offer belongs to one of this student's own
+  applications (404 otherwise, `"Offer not found"`); `offer.status ===
+  'sent'` (409 otherwise, `"This offer has already been responded to."` —
+  covers both a genuine repeat accept and a decline that already won a
+  concurrent race).
+- Success: 200 — sets `offer.status = accepted`, `offer.responded_at =
+  now()`, and `application.status = accepted`, in one row-locked
+  transaction. Response `data` is the updated Offer.
+- Errors: 401, 403, 404 (`"Offer not found"`), 409
+
+### PUT /api/student/offers/{offer}/decline
+- Same middleware
+- Preconditions: same as accept.
+- Success: 200 — sets `offer.status = declined`, `offer.responded_at =
+  now()`, and `application.status = rejected` (the same final status a
+  direct organization rejection produces — see docs/BUSINESS_RULES.md
+  section 5), in one row-locked transaction. Response `data` is the updated
+  Offer.
+- Errors: 401, 403, 404 (`"Offer not found"`), 409
 
 ---
 
