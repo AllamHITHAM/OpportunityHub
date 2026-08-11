@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Notification;
+use App\Models\Offer;
 use App\Models\User;
 use InvalidArgumentException;
 
@@ -27,18 +28,41 @@ use InvalidArgumentException;
  * call site's own doc comment for its exact placement/transition-guard
  * logic). No Admin-facing events exist in this phase.
  *
- * No Laravel Events/Listeners/Observers/Jobs/Mailables are used here —
- * every method is a plain synchronous call that inserts one row and
- * returns it, matching this project's current architecture doctrine and
- * scale (see docs/ARCHITECTURE.md). Because creation is transaction-bound,
- * an unexpected `NotificationService` failure can roll back the business
- * action it accompanies — acceptable now since this is a local DB insert
- * with no external I/O, but this must **not** carry over unchanged once
- * SMTP/email is added in a later phase (an external mail failure must never
- * roll back a real business action) — see docs/BUSINESS_RULES.md section 8.
+ * No Laravel Events/Listeners/Observers/Jobs are used here — every method
+ * is a plain synchronous call that inserts one row and returns it, matching
+ * this project's current architecture doctrine and scale (see
+ * docs/ARCHITECTURE.md). Because creation is transaction-bound, an
+ * unexpected `NotificationService` failure can roll back the business
+ * action it accompanies — acceptable since this is a local DB insert with
+ * no external I/O.
+ *
+ * **`EmailService` collaborator (Phase 7A-4.1).** This class remains the
+ * single conceptual "which workflow event happened, who does it concern"
+ * boundary — it still owns the in-app Notification's copy/type/priority/
+ * action_url exactly as before. It now also decides *which* of its events
+ * are important enough to also queue a transactional email, delegating the
+ * actual Mailable/transport/after-commit mechanics to `EmailService`
+ * (constructor-injected) rather than calling `Mail::` itself — mixing SMTP
+ * transport concerns into this class would defeat the point of having a
+ * separate `EmailService` at all. Only `notifyOfferSent()` queues an email
+ * so far; the remaining event methods are unchanged and queue nothing
+ * (Phase 7A-4.2 will extend the same pattern to them). Because
+ * `EmailService::sendOfferReceivedEmail()` queues with after-commit
+ * semantics (see `QueuedTransactionalMail`), calling it here — still inside
+ * the same `DB::transaction()` as the Offer mutation — does not carry the
+ * "an unexpected failure rolls back the business action" risk the in-app
+ * Notification insert above still has: a queue-dispatch failure raises
+ * immediately (see `EmailService`'s own doc comment on why that's
+ * deliberate), but the actual SMTP send itself never runs until well after
+ * this transaction has already committed, and its failure is isolated to
+ * the queued job (see docs/BUSINESS_RULES.md section 8).
  */
 class NotificationService
 {
+    public function __construct(private readonly EmailService $emails)
+    {
+    }
+
     /**
      * Mirrors the `notifications.type` enum exactly (see the
      * `2026_08_11_090000_add_assessment_and_offer_types_to_notifications_table`
@@ -284,13 +308,22 @@ class NotificationService
 
     /**
      * Student-facing: the organization sent a final Offer.
+     *
+     * @param  Offer  $offer  The just-created Offer (Phase 7A-4.1) — read
+     *                        here only to forward its display fields
+     *                        (start date, compensation, message) to
+     *                        `EmailService`; never persisted or altered.
+     *                        The in-app Notification's own copy/type/
+     *                        priority/action_url below is unchanged by its
+     *                        presence.
      */
     public function notifyOfferSent(
         User $studentUser,
         string $opportunityTitle,
         int $applicationId,
+        Offer $offer,
     ): Notification {
-        return $this->create(
+        $notification = $this->create(
             $studentUser,
             'Offer Received',
             "You received an offer for {$opportunityTitle}.",
@@ -298,6 +331,19 @@ class NotificationService
             priority: 'high',
             actionUrl: $this->studentApplicationPath($applicationId),
         );
+
+        $this->emails->sendOfferReceivedEmail(
+            $studentUser,
+            $opportunityTitle,
+            $applicationId,
+            startDate: $offer->start_date,
+            salaryAmount: $offer->salary_amount,
+            salaryCurrency: $offer->salary_currency,
+            salaryPeriod: $offer->salary_period,
+            offerMessage: $offer->message,
+        );
+
+        return $notification;
     }
 
     /**

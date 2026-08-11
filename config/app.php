@@ -56,6 +56,21 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Frontend Base URL
+    |--------------------------------------------------------------------------
+    |
+    | The base URL of the deployed Flutter Web build -- not this API's own
+    | URL. Used only to turn an in-app `action_url` (an app-relative Flutter
+    | route path, e.g. `/student/applications/42`) into an absolute link for
+    | outbound email CTAs (Phase 7A-4.1). Not a secret; no value is set here
+    | for production, only via `.env`.
+    |
+    */
+
+    'frontend_url' => env('FRONTEND_URL'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Application Timezone
     |--------------------------------------------------------------------------
     |

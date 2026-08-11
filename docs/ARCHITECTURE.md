@@ -885,6 +885,114 @@ out of scope for this phase (see docs/BUSINESS_RULES.md section 8).
 
 ---
 
+## Queued Email Foundation (Phase 7A-4.1)
+
+Adds the queued-transactional-email architecture and wires it into exactly
+one event — Offer Received — as a pilot. Proves the mechanism end-to-end
+before Phase 7A-4.2 extends the same pattern to the remaining six workflow
+events. **Architecture only**: `MAIL_MAILER` stays `log`, no external SMTP
+provider is configured, no live email is ever sent.
+
+- **The hard requirement this phase exists to satisfy**: SMTP/email failure
+  must never roll back or block a real business action (Offer creation,
+  Application status transitions, Notification creation) — flagged as
+  future work by `NotificationService`'s own doc comment and
+  docs/BUSINESS_RULES.md section 8 since Phase 7A-2, now addressed.
+- **`App\Mail\QueuedTransactionalMail`** — the shared abstract base class
+  every workflow Mailable extends (`App\Mail\OfferReceivedMail` is the
+  first). Implements `Illuminate\Contracts\Queue\ShouldQueueAfterCommit`
+  (which itself extends `ShouldQueue`, so no separate declaration is
+  needed) rather than setting the `Queueable` trait's public `$afterCommit`
+  property directly — confirmed against the installed framework source
+  (`vendor/laravel/framework/.../Mail/SendQueuedMailable.php`'s
+  constructor, and `.../Queue/Queue.php::shouldDispatchAfterCommit()`) that
+  this is the actual mechanism Laravel's queue layer checks, and that it is
+  honored identically regardless of `config('queue.connections.database.after_commit')`
+  (left `false`, the project-wide default — this is a **per-Mailable**
+  opt-in, never a global change). Also sets `queue = 'emails'`,
+  `tries = 3`, `timeout = 60`, `backoff = [30, 300, 1800]` (30s/5min/30min).
+  Every subclass must call `parent::__construct()`.
+- **`App\Services\EmailService`** — owns queued-email transport and
+  frontend-link composition. Exposes one method so far,
+  `sendOfferReceivedEmail(User $recipient, string $opportunityTitle, int $applicationId, ...)`,
+  which builds the CTA URL from `config('app.frontend_url')` +
+  `/student/applications/{applicationId}` (the same app-relative path
+  `NotificationService` already uses for this event's in-app `action_url`)
+  and queues `App\Mail\OfferReceivedMail` via `Mail::to(...)->queue(...)`
+  — never `Mail::send()`. Deliberately takes primitives (recipient, title,
+  ID, optional Offer display fields), not the `Offer`/`Application`/
+  `Opportunity` models, keeping the queued job payload small.
+- **`App\Mail\OfferReceivedMail`** — student-facing. Subject
+  `"Offer Received — {opportunity title}"`. Content: greeting, opportunity
+  title, start date and compensation (only rendered when
+  `salary_amount`/`salary_currency`/`salary_period` are **all** present —
+  a partial combination is a real, reachable state since every Offer term
+  is optional at creation, and is never rendered as malformed/half-blank
+  text), the Offer's own `message` field (already part of the student
+  Offer contract — see the Offer Foundation Architecture section above),
+  and a "View Offer" CTA. Uses the framework's default Markdown mail
+  components (`x-mail::message`/`x-mail::button`) — no custom template/
+  branding built. Never receives (and therefore can never render)
+  interview feedback/rating, quiz correct answers/score, AI match score,
+  or any other internal-only field — proven by rendering the actual
+  Mailable in tests, not merely by reasoning about what the constructor
+  accepts.
+- **`config('app.frontend_url')` / `FRONTEND_URL`** — the deployed Flutter
+  Web build's base URL (not this API's own `APP_URL`), added to
+  `config/app.php` and `.env.example`. `EmailService` never calls `env()`
+  directly.
+- **`NotificationService` → `EmailService` boundary.** `NotificationService`
+  remains the single conceptual "which workflow event happened, who does
+  it concern" boundary — it still owns the in-app Notification's
+  copy/type/priority/action_url exactly as before. `notifyOfferSent()` is
+  the only convenience method changed: it now also calls
+  `EmailService::sendOfferReceivedEmail()` after creating the Notification
+  row, still inside `OfferService::sendOffer()`'s existing transaction — no
+  second call site was added to `OfferService` itself (still exactly one
+  call to `notifyOfferSent()`, now carrying one additional argument, the
+  freshly-created `Offer`, so its display fields can be forwarded). Mixing
+  SMTP/Mailable mechanics into `NotificationService` itself was
+  deliberately avoided — that stays `EmailService`'s job.
+  `notifyApplicationSubmitted`/`notifyApplicationShortlisted`/
+  `notifyApplicationRejected`/`notifyInterviewScheduled`/
+  `notifyInterviewRescheduled`/`notifyQuizPublished`/
+  `notifyQuizResultAvailable`/`notifyQuizCompleted`/`notifyOfferAccepted`/
+  `notifyOfferDeclined` are all untouched and queue no email (Phase
+  7A-4.2).
+- **Constructor-injection regression.** `NotificationService` gained a
+  required `EmailService` dependency, which broke
+  `tests/Unit/Services/NotificationServiceTest.php`'s
+  `new NotificationService()` — the only direct-construction call site
+  found repo-wide. Fixed by resolving through the container
+  (`app(NotificationService::class)`), the same fix pattern the Phase
+  7A-2 entry above already used for `AssessmentService`/`OfferService`.
+- **Tested via four new files** —
+  `tests/Unit/Mail/QueuedTransactionalMailTest.php` (the base class's
+  public contract: `ShouldQueueAfterCommit`, queue/tries/timeout/backoff),
+  `tests/Unit/Services/EmailServiceTest.php` (`Mail::fake()` — correct
+  Mailable, recipient, CTA URL, forwarded Offer fields),
+  `tests/Unit/Mail/OfferReceivedMailTest.php` (renders the real Mailable —
+  subject, content, compensation formatting, and — critically — that
+  interview/quiz/AI-internal fields are absent from the actual rendered
+  output, not merely absent because nothing passed them in), and
+  `tests/Feature/Notifications/WorkflowEmailTest.php` (one real HTTP call
+  per scenario: success queues exactly one email; wrong-organization,
+  incomplete-assessment, and duplicate-offer requests queue none/no
+  additional email; a forced failure immediately after `notifyOfferSent()`
+  but before commit rolls back both the Offer and the Notification). The
+  rollback test deliberately does **not** use `Mail::fake()` — `MailFake`
+  records a queued mailable the instant `->queue()` is called, bypassing
+  the real `afterCommit`/`DatabaseTransactionsManager` deferral entirely,
+  so it cannot prove anything about that specific mechanism; that the
+  Mailable is never dispatched at all in the first place is proven
+  structurally by `QueuedTransactionalMailTest` instead (observing a
+  genuine top-level transaction *commit* from inside a
+  `RefreshDatabase`-wrapped test is not possible, since `RefreshDatabase`
+  itself keeps an outer transaction open for the whole test and rolls it
+  back at teardown).
+
+---
+
 ## Development Flow
 
 Database

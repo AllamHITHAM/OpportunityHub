@@ -81,11 +81,18 @@ class OfferService
                 // Phase 7A-2: only reached after both eligibility checks
                 // above pass and the Offer/status mutation succeeds -- no
                 // notification for a duplicate Offer, an ineligible source
-                // status, or an incomplete Assessment.
+                // status, or an incomplete Assessment. Phase 7A-4.1: the
+                // freshly-created $offer is passed through so
+                // NotificationService can forward its display fields to
+                // EmailService for the "Offer Received" email -- this is
+                // still exactly one call to notifyOfferSent(), not a second
+                // call to EmailService from here (see NotificationService's
+                // own doc comment on that boundary).
                 $this->notifications->notifyOfferSent(
                     $application->studentProfile->user,
                     $application->opportunity->title,
                     $application->id,
+                    $offer,
                 );
 
                 return $offer;

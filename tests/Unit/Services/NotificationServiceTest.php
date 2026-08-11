@@ -2,6 +2,7 @@
 
 namespace Tests\Unit\Services;
 
+use App\Models\Offer;
 use App\Models\User;
 use App\Services\NotificationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -28,7 +29,12 @@ class NotificationServiceTest extends TestCase
     {
         parent::setUp();
 
-        $this->notifications = new NotificationService();
+        // Resolved via the container (Phase 7A-4.1: NotificationService now
+        // depends on EmailService) rather than `new NotificationService()`
+        // -- see docs/ARCHITECTURE.md on why every constructor-injection
+        // change like this prefers container resolution over touching
+        // every direct-construction call site.
+        $this->notifications = app(NotificationService::class);
     }
 
     // -----------------------------------------------------------------
@@ -373,11 +379,16 @@ class NotificationServiceTest extends TestCase
     public function test_notify_offer_sent(): void
     {
         $studentUser = $this->studentUser();
+        // Never persisted -- notifyOfferSent() only reads display fields
+        // off it (Phase 7A-4.1, forwarded to EmailService), it does not
+        // save/mutate the Offer itself.
+        $offer = new Offer();
 
         $notification = $this->notifications->notifyOfferSent(
             $studentUser,
             'Backend Developer',
             applicationId: 5,
+            offer: $offer,
         );
 
         $this->assertSame($studentUser->id, $notification->user_id);
