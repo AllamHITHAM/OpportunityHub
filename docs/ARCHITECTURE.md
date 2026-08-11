@@ -724,6 +724,70 @@ this is a pointer for a later phase, not something Phase 6C-1 implements.
 
 ---
 
+## Notification Service Foundation (Phase 7A-1)
+
+Builds the one backend API for creating in-app Notification rows, and
+widens `notifications.type` to precisely represent Quiz and Offer events.
+**Does not wire it into any workflow** — that is Phase 7A-2. This phase is
+independently complete and independently tested: `NotificationService` has
+no callers yet.
+
+- **`notifications.type` widened from 5 to 7 values**
+  (`2026_08_11_090000_add_assessment_and_offer_types_to_notifications_table`):
+  adds `assessment` and `offer` alongside the existing `system`,
+  `application`, `interview`, `organization`, `opportunity`. Same
+  doctrine/dbal-free driver split every prior enum-widening migration in
+  this project uses (`add_offer_sent_status_to_applications_table`,
+  `add_in_assessment_status_to_applications_table`): a raw `MODIFY` on
+  MySQL/MariaDB, `Blueprint::change()` on SQLite. No row is rewritten going
+  forward (nothing creates one with either new value yet); `down()`
+  defensively falls any row already holding one back to `system` before
+  shrinking the enum, matching the same non-destructive-rollback
+  convention those migrations established, even though this case isn't
+  currently reachable.
+- **`App\Services\NotificationService`** — one generic `create(User $user,
+  string $title, string $message, string $type = 'system', string
+  $priority = 'normal', ?string $actionUrl = null): Notification`, which
+  validates `$type`/`$priority` against the real enum values
+  (`InvalidArgumentException` on a bad one, before ever reaching the
+  database) and otherwise just calls `Notification::create()`. Ten
+  convenience methods sit on top of it — one per recommended v1 event
+  (`notifyApplicationSubmitted`, `notifyApplicationShortlisted`,
+  `notifyApplicationRejected`, `notifyInterviewScheduled`,
+  `notifyInterviewRescheduled`, `notifyQuizPublished`,
+  `notifyQuizCompleted`, `notifyOfferSent`, `notifyOfferAccepted`,
+  `notifyOfferDeclined`) — each resolving fixed copy, the correct
+  `type`/`priority` (see docs/BUSINESS_RULES.md section 8), and an
+  app-relative `action_url` matching the Flutter app's own `AppRoutes`
+  path constants exactly (e.g. `/student/applications/{id}`,
+  `/organization/applications/{id}`, `/student/assessments/{id}/quiz`) —
+  never a full domain URL, never a `{type, id}` pair.
+- **No Events/Listeners/Observers/Jobs/Mailables** — every method is a
+  plain synchronous call that inserts one row and returns it. Matches this
+  project's "one service owns this concern" doctrine (`AssessmentService`,
+  `OfferService`) at its current scale; see the Phase 7A architecture
+  inspection this phase followed for the fuller reasoning on why Events
+  weren't adopted here.
+- **`Notification` model/migration/`NotificationController` are otherwise
+  untouched.** `fillable`/`casts` were already exactly what this phase
+  needed; no model change was required.
+- **No workflow wiring.** `Organization\ApplicationController`,
+  `Student\ApplicationController`, `AssessmentService`,
+  `Organization\InterviewController`, `Organization\QuizController`,
+  `Student\QuizController`, `OfferService` are all untouched — none of them
+  call `NotificationService`. See docs/BUSINESS_RULES.md section 8 for the
+  exact recommended attachment points Phase 7A-2 will use.
+- **Tested via `tests/Unit/Services/NotificationServiceTest.php`** (direct
+  unit coverage — there is no HTTP endpoint to test through yet, since
+  nothing calls the service) and
+  `tests/Feature/Notifications/NotificationTypeMigrationTest.php` (the
+  migration's up/rollback/re-run path, mirroring
+  `OfferSentStatusMigrationTest`'s own pattern). The pre-existing
+  `NotificationTest.php` (list/mark-read/mark-all/ownership) needed no
+  changes at all.
+
+---
+
 ## Development Flow
 
 Database

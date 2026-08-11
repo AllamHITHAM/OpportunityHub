@@ -267,8 +267,9 @@ class AssessmentMigrationTest extends TestCase
 
         Artisan::call('migrate');
 
-        // Rolls back the seven most recently applied migrations: Phase
-        // 6C-1's `create_offers_table`, Phase 6C-0's
+        // Rolls back the eight most recently applied migrations: Phase
+        // 7A-1's `add_assessment_and_offer_types_to_notifications_table`,
+        // Phase 6C-1's `create_offers_table`, Phase 6C-0's
         // `add_offer_sent_status_to_applications_table`, Phase
         // 6B-3's `create_quiz_attempts_table`, Phase 6B-1's
         // `create_questions_table`/`create_quizzes_table`, and Phase 6B-0's
@@ -276,7 +277,7 @@ class AssessmentMigrationTest extends TestCase
         // to `interviews`, a no-op for this assertion) and the retarget
         // migration itself. Assessments must still exist immediately after,
         // since retarget's `down()` reads from it.
-        Artisan::call('migrate:rollback', ['--step' => 7]);
+        Artisan::call('migrate:rollback', ['--step' => 8]);
 
         $interview = DB::table('interviews')->first();
         $this->assertSame($applicationId, $interview->application_id);
@@ -295,14 +296,15 @@ class AssessmentMigrationTest extends TestCase
         $this->insertLegacyInterview($applicationId);
 
         Artisan::call('migrate');
-        // Eight most recently applied migrations: Phase 6C-1's
-        // `create_offers_table`, Phase 6C-0's
+        // Nine most recently applied migrations: Phase 7A-1's
+        // `add_assessment_and_offer_types_to_notifications_table`, Phase
+        // 6C-1's `create_offers_table`, Phase 6C-0's
         // `add_offer_sent_status_to_applications_table`, Phase 6B-3's
         // `create_quiz_attempts_table`, Phase 6B-1's
         // `create_questions_table`/`create_quizzes_table`, Phase 6B-0's
         // `add_in_assessment_status_to_applications_table`, the retarget
         // migration, and `create_assessments_table` itself.
-        Artisan::call('migrate:rollback', ['--step' => 8]);
+        Artisan::call('migrate:rollback', ['--step' => 9]);
 
         $this->assertFalse(\Illuminate\Support\Facades\Schema::hasTable('assessments'));
         $this->assertTrue(\Illuminate\Support\Facades\Schema::hasColumn('interviews', 'application_id'));
@@ -311,7 +313,7 @@ class AssessmentMigrationTest extends TestCase
 
     public function test_application_id_not_null_is_enforced_after_rollback(): void
     {
-        Artisan::call('migrate:rollback', ['--step' => 7]);
+        Artisan::call('migrate:rollback', ['--step' => 8]);
 
         $this->expectException(\Illuminate\Database\QueryException::class);
 
@@ -326,7 +328,7 @@ class AssessmentMigrationTest extends TestCase
 
     public function test_application_id_foreign_key_rejects_a_nonexistent_application_after_rollback(): void
     {
-        Artisan::call('migrate:rollback', ['--step' => 7]);
+        Artisan::call('migrate:rollback', ['--step' => 8]);
 
         $this->expectException(\Illuminate\Database\QueryException::class);
 
@@ -343,7 +345,7 @@ class AssessmentMigrationTest extends TestCase
     {
         $applicationId = $this->seedApplication();
 
-        Artisan::call('migrate:rollback', ['--step' => 7]);
+        Artisan::call('migrate:rollback', ['--step' => 8]);
 
         DB::table('interviews')->insert([
             'application_id' => $applicationId,
@@ -370,14 +372,15 @@ class AssessmentMigrationTest extends TestCase
      * `add_in_assessment_status_to_applications_table`, Phase 6B-1's
      * `create_quizzes_table`/`create_questions_table`, Phase 6B-3's
      * `create_quiz_attempts_table`, Phase 6C-0's
-     * `add_offer_sent_status_to_applications_table`, and Phase 6C-1's
-     * `create_offers_table` -- all no-ops for `interviews`), returning the
-     * schema to its pre-Phase-4A-1 shape so a legacy
-     * `interviews.application_id` row can be seeded.
+     * `add_offer_sent_status_to_applications_table`, Phase 6C-1's
+     * `create_offers_table`, and Phase 7A-1's
+     * `add_assessment_and_offer_types_to_notifications_table` -- all no-ops
+     * for `interviews`), returning the schema to its pre-Phase-4A-1 shape so
+     * a legacy `interviews.application_id` row can be seeded.
      */
     private function rollBackRetargetMigrations(): void
     {
-        Artisan::call('migrate:rollback', ['--step' => 7]);
+        Artisan::call('migrate:rollback', ['--step' => 8]);
     }
 
     private function insertLegacyInterview(int $applicationId, array $overrides = []): int

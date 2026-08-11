@@ -27,11 +27,13 @@ use Tests\TestCase;
  * which table they touch, so this file's own step count still needs
  * recalculating whenever a later phase adds a new migration on top --
  * exactly the same fragility `AssessmentMigrationTest` already has, contrary
- * to what an earlier version of this comment claimed. As of Phase 6C-1,
- * `2026_08_10_142102_create_offers_table` sits directly on top of this
- * migration, so `--step => 2` is required to reach past both and back to
- * this migration's own effect (dropping `offers` along the way is harmless
- * for every assertion in this file, which only ever touches `applications`).
+ * to what an earlier version of this comment claimed. As of Phase 7A-1,
+ * `2026_08_10_142102_create_offers_table` and
+ * `2026_08_11_090000_add_assessment_and_offer_types_to_notifications_table`
+ * both sit on top of this migration, so `--step => 3` is required to reach
+ * past all three and back to this migration's own effect (dropping
+ * `offers`/widening `notifications.type` along the way is harmless for
+ * every assertion in this file, which only ever touches `applications`).
  */
 class OfferSentStatusMigrationTest extends TestCase
 {
@@ -78,7 +80,7 @@ class OfferSentStatusMigrationTest extends TestCase
         $applicationId = $this->seedApplication();
         DB::table('applications')->where('id', $applicationId)->update(['status' => 'offer_sent']);
 
-        Artisan::call('migrate:rollback', ['--step' => 2]);
+        Artisan::call('migrate:rollback', ['--step' => 3]);
 
         $this->assertSame(
             'in_assessment',
@@ -98,7 +100,7 @@ class OfferSentStatusMigrationTest extends TestCase
         $interviewScheduledId = $this->seedApplication();
         DB::table('applications')->where('id', $interviewScheduledId)->update(['status' => 'interview_scheduled']);
 
-        Artisan::call('migrate:rollback', ['--step' => 2]);
+        Artisan::call('migrate:rollback', ['--step' => 3]);
 
         $this->assertSame('pending', DB::table('applications')->where('id', $pendingId)->value('status'));
         $this->assertSame('shortlisted', DB::table('applications')->where('id', $shortlistedId)->value('status'));
@@ -118,7 +120,7 @@ class OfferSentStatusMigrationTest extends TestCase
             'cover_letter' => 'A very specific cover letter.',
         ]);
 
-        Artisan::call('migrate:rollback', ['--step' => 2]);
+        Artisan::call('migrate:rollback', ['--step' => 3]);
 
         $row = DB::table('applications')->where('id', $applicationId)->first();
         $this->assertSame('A very specific cover letter.', $row->cover_letter);
@@ -129,7 +131,7 @@ class OfferSentStatusMigrationTest extends TestCase
     {
         $applicationId = $this->seedApplication();
 
-        Artisan::call('migrate:rollback', ['--step' => 2]);
+        Artisan::call('migrate:rollback', ['--step' => 3]);
         Artisan::call('migrate');
 
         DB::table('applications')->where('id', $applicationId)->update(['status' => 'offer_sent']);
@@ -142,7 +144,7 @@ class OfferSentStatusMigrationTest extends TestCase
 
     public function test_rollback_removes_offer_sent_from_the_enum(): void
     {
-        Artisan::call('migrate:rollback', ['--step' => 2]);
+        Artisan::call('migrate:rollback', ['--step' => 3]);
 
         $applicationId = $this->seedApplication();
 

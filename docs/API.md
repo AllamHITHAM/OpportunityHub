@@ -583,7 +583,9 @@ Both endpoints run the same rule-based `MatchingService` (skills compared agains
 
 ## 9. Notifications
 
-**Not yet created by any endpoint as of Phase 4A-1.** The routes below can read/mark-as-read existing rows, but nothing in the application writes a `Notification` row — not for applications, not for interviews/assessments. This is deferred to a later phase (see docs/BUSINESS_RULES.md).
+**Still not created by any workflow as of Phase 7A-1.** The routes below can read/mark-as-read existing rows, but nothing in the application writes a `Notification` row yet — not for applications, not for interviews/assessments/quizzes/offers. Phase 7A-1 added `App\Services\NotificationService` — the one backend API future workflow code will call to create a notification — but deliberately does not call it from anywhere yet; no business action (application status change, interview scheduling, quiz publish/completion, Offer send/accept/decline) currently creates a notification as a side effect. That wiring is Phase 7A-2. See docs/BUSINESS_RULES.md section 8 and docs/ARCHITECTURE.md.
+
+**`notifications.type` now supports 7 values** (widened in Phase 7A-1, `2026_08_11_090000_add_assessment_and_offer_types_to_notifications_table`): `system`, `application`, `interview`, `assessment`, `offer`, `organization`, `opportunity`. `assessment` and `offer` are new; the other five are unchanged. No row currently holds either new value (nothing creates one yet).
 
 ### GET /api/notifications
 - Middleware: `auth:sanctum, active` (any role)
