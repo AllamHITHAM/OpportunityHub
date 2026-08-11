@@ -788,6 +788,103 @@ no callers yet.
 
 ---
 
+## Backend Workflow Notification Integration (Phase 7A-2)
+
+Wires `NotificationService` (Phase 7A-1) into the real recruitment
+workflow. No Events/Listeners/Observers/Jobs, no SMTP/email, no push, no
+Admin-facing events, and no change to the existing
+`GET/PUT /api/notifications*` read/mark-read contract — all deliberately
+out of scope for this phase (see docs/BUSINESS_RULES.md section 8).
+
+- **Recipient resolution** uses the same canonical relation chains
+  everywhere in this codebase already does:
+  `Application::studentProfile->user` for the student, and
+  `Application::opportunity->organizationProfile->user` for the
+  organization. No new relation was added — both chains already existed.
+- **Seven integration points, one call each**, every one placed inside the
+  existing (or, for two controller methods that had none, newly added)
+  `DB::transaction()` around the business mutation it accompanies:
+  - `Student\ApplicationController::store()` — wrapped the previously
+    untransacted `Application::create()` in `DB::transaction()` so the
+    Application insert and the organization's "New Application"
+    notification commit or roll back together; the pre-existing duplicate-
+    apply `QueryException` catch still wraps the whole thing unchanged.
+  - `Organization\ApplicationController::updateStatus()` — likewise newly
+    wrapped in `DB::transaction()`. Captures `$previousStatus` before the
+    mutation and only calls `notifyApplicationShortlisted()`/
+    `notifyApplicationRejected()` when the *new* status differs from the
+    *previous* one and is exactly `shortlisted`/`rejected` — transition-
+    based, not request-based, so a request that re-asserts the current
+    status (or asks for `reviewed`, which has no notification) creates
+    nothing.
+  - `AssessmentService::createInterviewAssessment()` — the notification is
+    emitted from inside this one shared service method's existing
+    transaction, not from either of its two callers
+    (`Organization\InterviewController::store()`, the legacy dedicated
+    route, and `Organization\AssessmentController::store()`, the generic
+    `type=interview` route) — both delegate here, so emitting from a
+    controller instead would risk a double notification if a future change
+    ever called both paths for the same event.
+  - `Organization\InterviewController::update()` — newly wrapped in
+    `DB::transaction()`. Captures the interview's `scheduled_at`/
+    `interview_type` before the mutation (Carbon's `equalTo()`, never
+    `!==`/`===`, since two distinct Carbon instances for the same instant
+    are never identity-equal) and only notifies when either actually
+    changed — a logistics-only edit (`meeting_link`/`location`/
+    `interviewer_name`/`notes`) is not treated as a reschedule.
+  - `Organization\QuizController::publish()` — inside the method's existing
+    transaction; only reachable once per quiz, since the pre-existing
+    `status !== 'draft'` guard already 422s a second publish attempt before
+    the transaction (and therefore the notification) is ever reached.
+  - `Student\QuizController::submit()` — inside the method's existing
+    row-locked grading transaction; only reached after every early-exit
+    (not started, already submitted, time limit expired) has already
+    thrown, so exactly one pair of notifications
+    (`notifyQuizResultAvailable()` to the student,
+    `notifyQuizCompleted()` to the organization) is created per genuine
+    first submission.
+  - `OfferService::sendOffer()`/`acceptOffer()`/`declineOffer()` (the
+    latter two sharing `respondToOffer()`) — inside each method's existing
+    transaction. `respondToOffer()`'s pre-existing row lock
+    (`lockForUpdate()`) already guarantees a second response always finds
+    `status` no longer `sent` and throws before the notification call is
+    ever reached, so accept/decline notifications are structurally
+    exactly-once per Offer, the same guarantee that already prevented
+    `Offer.status`/`Application.status` from ever diverging.
+- **`NotificationService` itself gained one new convenience method**,
+  `notifyQuizResultAvailable()` (student-facing "your quiz result is
+  ready") — distinct from the pre-existing `notifyQuizCompleted()`
+  (organization-facing "a student finished a quiz"), since the two sides
+  of the same underlying event genuinely need different copy and
+  recipients, the same reasoning `notifyOfferAccepted()`/
+  `notifyOfferDeclined()` already established.
+- **The Offer-decline / generic-reject overlap is structurally impossible,
+  not specially guarded.** An Offer decline
+  (`OfferService::declineOffer()`) and a direct organization rejection
+  (`Organization\ApplicationController::updateStatus()`) both land
+  `Application.status` on `rejected`, but only the latter ever creates the
+  generic "Application Update" notification — because the Phase 6C-4 Offer
+  integrity rule already blocks `updateStatus()` entirely (409) the moment
+  an Offer exists, before this phase's transition check is ever reached.
+  No new code was needed to keep the two notifications from double-firing
+  for the same application; it falls out of a guarantee this project
+  already had.
+- **Two Feature-test files needed a one-line constructor fix**
+  (`tests/Feature/Assessments/AssessmentCreationParityTest.php`,
+  `tests/Feature/Offers/SendOfferTest.php`): both directly reflected into a
+  private method via `new AssessmentService()`/`new OfferService()`, which
+  broke once each service gained a constructor dependency. Fixed by
+  resolving through the container (`app(AssessmentService::class)`) instead
+  — no assertion or test intent changed.
+- **Tested via `tests/Feature/Notifications/WorkflowNotificationTest.php`**
+  (33 tests) — one real HTTP call per event, asserting exact recipient,
+  copy, `type`/`priority`/`action_url`, and (critically) that a failed,
+  blocked, wrong-ownership, idempotent, or duplicate request creates zero
+  notifications. The pre-existing `NotificationTest.php` needed no changes
+  at all — confirmed via `git diff` showing zero lines touched.
+
+---
+
 ## Development Flow
 
 Database

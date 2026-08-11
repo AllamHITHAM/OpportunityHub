@@ -28,6 +28,10 @@ use Illuminate\Support\Facades\DB;
  */
 class OfferService
 {
+    public function __construct(private readonly NotificationService $notifications)
+    {
+    }
+
     /**
      * Creates an Offer for `$application` and moves it to `offer_sent`, in
      * one transaction.
@@ -73,6 +77,16 @@ class OfferService
 
                 $application->status = 'offer_sent';
                 $application->save();
+
+                // Phase 7A-2: only reached after both eligibility checks
+                // above pass and the Offer/status mutation succeeds -- no
+                // notification for a duplicate Offer, an ineligible source
+                // status, or an incomplete Assessment.
+                $this->notifications->notifyOfferSent(
+                    $application->studentProfile->user,
+                    $application->opportunity->title,
+                    $application->id,
+                );
 
                 return $offer;
             });
@@ -144,6 +158,35 @@ class OfferService
             $application = $locked->application;
             $application->status = $applicationStatus;
             $application->save();
+
+            // Phase 7A-2: only reached once per Offer -- a second response
+            // (or a decline racing an accept) always finds `status` no
+            // longer `sent` and throws above instead, so this never fires
+            // twice for the same Offer. Organization-facing only; the
+            // student who just responded is never notified about their own
+            // action.
+            $organizationUser = $application->opportunity->organizationProfile->user;
+            $studentName = $application->studentProfile->user->name;
+            $opportunityTitle = $application->opportunity->title;
+
+            if ($offerStatus === 'accepted') {
+                $this->notifications->notifyOfferAccepted(
+                    $organizationUser,
+                    $studentName,
+                    $opportunityTitle,
+                    $application->id,
+                );
+            } else {
+                // The only other terminal value `respondToOffer()` is ever
+                // called with is `declined` (see `declineOffer()` above) --
+                // never a generic "else" for some other unrelated status.
+                $this->notifications->notifyOfferDeclined(
+                    $organizationUser,
+                    $studentName,
+                    $opportunityTitle,
+                    $application->id,
+                );
+            }
 
             return $locked;
         });

@@ -583,9 +583,13 @@ Both endpoints run the same rule-based `MatchingService` (skills compared agains
 
 ## 9. Notifications
 
-**Still not created by any workflow as of Phase 7A-1.** The routes below can read/mark-as-read existing rows, but nothing in the application writes a `Notification` row yet — not for applications, not for interviews/assessments/quizzes/offers. Phase 7A-1 added `App\Services\NotificationService` — the one backend API future workflow code will call to create a notification — but deliberately does not call it from anywhere yet; no business action (application status change, interview scheduling, quiz publish/completion, Offer send/accept/decline) currently creates a notification as a side effect. That wiring is Phase 7A-2. See docs/BUSINESS_RULES.md section 8 and docs/ARCHITECTURE.md.
+**Actively created by the real workflow as of Phase 7A-2.** `App\Services\NotificationService` (Phase 7A-1) is now called from the business action itself, synchronously, inside the same DB transaction as the mutation it accompanies — see docs/BUSINESS_RULES.md section 8 for the exact event list and docs/ARCHITECTURE.md for the full integration-point-by-integration-point breakdown. Every notification is transition-based, not request-based (e.g. re-submitting an already-`shortlisted` status creates nothing) — no request-level or DB-level deduplication table exists; correctness comes entirely from each integration point only calling `NotificationService` on a genuine first-time transition.
 
-**`notifications.type` now supports 7 values** (widened in Phase 7A-1, `2026_08_11_090000_add_assessment_and_offer_types_to_notifications_table`): `system`, `application`, `interview`, `assessment`, `offer`, `organization`, `opportunity`. `assessment` and `offer` are new; the other five are unchanged. No row currently holds either new value (nothing creates one yet).
+**No Admin-facing notifications exist in this phase.** Only Student- and Organization-facing events are wired.
+
+**No push notifications and no email/SMTP exist yet.** `action_url` is always an app-relative Flutter route path (e.g. `/student/applications/42`), matching the Flutter app's own `AppRoutes` constants exactly — never a full domain URL. Flutter has no Notification Center UI yet (deferred to Phase 7A-3) — these routes are the only way to observe a notification today.
+
+**`notifications.type` supports 7 values** (widened in Phase 7A-1, `2026_08_11_090000_add_assessment_and_offer_types_to_notifications_table`): `system`, `application`, `interview`, `assessment`, `offer`, `organization`, `opportunity`. As of Phase 7A-2, `application`/`interview`/`assessment`/`offer` rows are now genuinely created by the workflow; `organization`/`opportunity` remain unused by any current event (no event in this phase's matrix needs them) and `system` is the untouched generic fallback.
 
 ### GET /api/notifications
 - Middleware: `auth:sanctum, active` (any role)

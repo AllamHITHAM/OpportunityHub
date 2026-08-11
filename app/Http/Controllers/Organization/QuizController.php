@@ -8,6 +8,7 @@ use App\Http\Requests\Organization\UpdateQuestionRequest;
 use App\Models\Assessment;
 use App\Models\Question;
 use App\Models\Quiz;
+use App\Services\NotificationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -20,6 +21,10 @@ use Illuminate\Support\Facades\DB;
  */
 class QuizController extends Controller
 {
+    public function __construct(private readonly NotificationService $notifications)
+    {
+    }
+
     /**
      * The quiz (if any) belonging to a specific assessment the organization
      * owns. Mirrors `AssessmentController::showForApplication()`'s
@@ -188,6 +193,16 @@ class QuizController extends Controller
             // Assessment's own generic lifecycle advances here.
             $quiz->assessment->status = 'scheduled';
             $quiz->assessment->save();
+
+            // Phase 7A-2: only reachable once, since the draft-only guard
+            // above already 422s a second publish attempt -- exactly one
+            // notification per real draft -> published transition.
+            $application = $quiz->assessment->application;
+            $this->notifications->notifyQuizPublished(
+                $application->studentProfile->user,
+                $application->opportunity->title,
+                $quiz->assessment_id,
+            );
         });
 
         return response()->json([

@@ -230,7 +230,7 @@ class AssessmentCreationParityTest extends TestCase
 
         $this->assertNotNull($unrelatedViolation, 'Expected the missing required opportunity fields to fail.');
 
-        $service = new AssessmentService();
+        $service = app(AssessmentService::class);
         $method = new ReflectionMethod(AssessmentService::class, 'isDuplicateAssessmentViolation');
         $method->setAccessible(true);
 

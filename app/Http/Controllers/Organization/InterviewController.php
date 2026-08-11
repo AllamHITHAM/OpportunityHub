@@ -11,14 +11,17 @@ use App\Http\Requests\Organization\UpdateInterviewRequest;
 use App\Models\Application;
 use App\Models\Interview;
 use App\Services\AssessmentService;
+use App\Services\NotificationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class InterviewController extends Controller
 {
-    public function __construct(private readonly AssessmentService $assessments)
-    {
+    public function __construct(
+        private readonly AssessmentService $assessments,
+        private readonly NotificationService $notifications,
+    ) {
     }
 
     public function store(StoreInterviewRequest $request, Application $application): JsonResponse
@@ -99,7 +102,39 @@ class InterviewController extends Controller
             ], 404);
         }
 
-        $interview->update($request->validated());
+        // Captured before the mutation -- `UpdateInterviewRequest` requires
+        // `interview_type`/`scheduled_at` on every call (full-replace PUT
+        // semantics), so an idempotent re-submit of the same values must
+        // not read as a reschedule. `scheduled_at` is compared with
+        // Carbon's own `equalTo()`, not `!==` (two different Carbon
+        // instances for the same instant are never `===`/`!==`-equal by
+        // object identity).
+        $previousScheduledAt = $interview->scheduled_at;
+        $previousInterviewType = $interview->interview_type;
+
+        DB::transaction(function () use ($request, $interview, $previousScheduledAt, $previousInterviewType) {
+            $interview->update($request->validated());
+
+            // Phase 7A-2: "rescheduled" means the date/time or the
+            // interview format itself changed -- not a logistics-only edit
+            // (meeting_link/location/interviewer_name/notes) for the same
+            // slot, which doesn't meaningfully change what the student
+            // already knows to expect.
+            $scheduledAtChanged = $previousScheduledAt === null
+                || ! $previousScheduledAt->equalTo($interview->scheduled_at);
+            $typeChanged = $previousInterviewType !== $interview->interview_type;
+
+            if (! $scheduledAtChanged && ! $typeChanged) {
+                return;
+            }
+
+            $application = $interview->assessment->application;
+            $this->notifications->notifyInterviewRescheduled(
+                $application->studentProfile->user,
+                $application->opportunity->title,
+                $application->id,
+            );
+        });
 
         return response()->json([
             'success' => true,

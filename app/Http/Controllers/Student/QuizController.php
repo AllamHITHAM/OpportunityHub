@@ -12,6 +12,7 @@ use App\Models\Application;
 use App\Models\Assessment;
 use App\Models\Quiz;
 use App\Models\QuizAttempt;
+use App\Services\NotificationService;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -27,6 +28,10 @@ use Illuminate\Support\Facades\DB;
 class QuizController extends Controller
 {
     use HidesInternalQuestionFields;
+
+    public function __construct(private readonly NotificationService $notifications)
+    {
+    }
 
     /**
      * `GET /student/assessments/{assessment}/quiz`. Deliberately returns
@@ -245,6 +250,26 @@ class QuizController extends Controller
                 $assessment->result = $score >= $quiz->passing_score ? 'passed' : 'failed';
                 $assessment->completed_at = now();
                 $assessment->save();
+
+                // Phase 7A-2: only reached on a genuine first submission --
+                // every early-exit above (not started, already submitted,
+                // time limit expired) throws before this point, so exactly
+                // one pair of notifications is created per real submit.
+                $studentUser = $application->studentProfile->user;
+                $organizationUser = $application->opportunity->organizationProfile->user;
+                $opportunityTitle = $application->opportunity->title;
+
+                $this->notifications->notifyQuizResultAvailable(
+                    $studentUser,
+                    $opportunityTitle,
+                    $application->id,
+                );
+                $this->notifications->notifyQuizCompleted(
+                    $organizationUser,
+                    $studentUser->name,
+                    $opportunityTitle,
+                    $application->id,
+                );
 
                 return $locked;
             });

@@ -6,11 +6,17 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\Organization\UpdateApplicationStatusRequest;
 use App\Models\Application;
 use App\Models\Opportunity;
+use App\Services\NotificationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class ApplicationController extends Controller
 {
+    public function __construct(private readonly NotificationService $notifications)
+    {
+    }
+
     public function index(Request $request): JsonResponse
     {
         $organizationId = $request->user()->organizationProfile->id;
@@ -97,9 +103,50 @@ class ApplicationController extends Controller
             ], 409);
         }
 
-        $application->status = $request->validated('status');
-        $application->reviewed_at = now();
-        $application->save();
+        $previousStatus = $application->status;
+        $newStatus = $request->validated('status');
+
+        // Phase 7A-2: notification is transition-based, not request-based —
+        // a request that re-sets the application's already-current status
+        // (e.g. shortlisted -> shortlisted) must never create a duplicate
+        // notification. Only `shortlisted`/`rejected` have a defined
+        // student-facing event; `reviewed` has none. Wrapped in the same
+        // transaction as the status mutation so a Notification failure
+        // rolls back the status change too (see NotificationService's own
+        // doc comment on why that's acceptable for a local DB insert).
+        DB::transaction(function () use ($application, $newStatus, $previousStatus) {
+            $application->status = $newStatus;
+            $application->reviewed_at = now();
+            $application->save();
+
+            if ($newStatus === $previousStatus) {
+                return;
+            }
+
+            if ($newStatus === 'shortlisted') {
+                $this->notifications->notifyApplicationShortlisted(
+                    $application->studentProfile->user,
+                    $application->opportunity->title,
+                    $application->id,
+                );
+            } elseif ($newStatus === 'rejected') {
+                // This is the only place a generic "Application Update"
+                // rejection notification is ever created. An Offer decline
+                // (OfferService::declineOffer()) also lands the Application
+                // on `rejected`, but that path is structurally unreachable
+                // from here: once an Offer exists, the guard above (line
+                // ~92) already blocks this entire endpoint with a 409
+                // before this transaction ever starts. The two rejection
+                // notifications (this one, and notifyOfferDeclined() to the
+                // organization) can therefore never both fire for the same
+                // application.
+                $this->notifications->notifyApplicationRejected(
+                    $application->studentProfile->user,
+                    $application->opportunity->title,
+                    $application->id,
+                );
+            }
+        });
 
         return response()->json([
             'success' => true,

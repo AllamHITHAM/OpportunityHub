@@ -9,24 +9,33 @@ use InvalidArgumentException;
 /**
  * The single backend API for creating in-app Notification rows (Phase
  * 7A-1). Every current business workflow (Application, Assessment/
- * Interview, Quiz, Offer) is expected to route its notification-worthy
- * events through this service's convenience methods rather than calling
+ * Interview, Quiz, Offer) routes its notification-worthy events through
+ * this service's convenience methods rather than calling
  * `Notification::create()` directly, the same "one service owns this
  * concern" doctrine `AssessmentService`/`OfferService` already establish
  * for their own domains.
  *
- * **Not wired into any workflow yet.** `Organization\ApplicationController`,
- * `Student\ApplicationController`, `AssessmentService`,
- * `Organization\InterviewController`, `Organization\QuizController`,
- * `Student\QuizController`, and `OfferService` are all untouched in this
- * phase — none of them call this service. That wiring is Phase 7A-2. This
- * class is independently testable and complete on its own; it simply has no
- * callers yet.
+ * **Wired into the real workflow as of Phase 7A-2.**
+ * `Student\ApplicationController::store()`,
+ * `Organization\ApplicationController::updateStatus()`,
+ * `AssessmentService::createInterviewAssessment()`,
+ * `Organization\InterviewController::update()`,
+ * `Organization\QuizController::publish()`,
+ * `Student\QuizController::submit()`, and every `OfferService` transition
+ * method now call this service — always synchronously, always inside the
+ * same DB transaction as the business mutation it accompanies (see each
+ * call site's own doc comment for its exact placement/transition-guard
+ * logic). No Admin-facing events exist in this phase.
  *
  * No Laravel Events/Listeners/Observers/Jobs/Mailables are used here —
  * every method is a plain synchronous call that inserts one row and
  * returns it, matching this project's current architecture doctrine and
- * scale (see docs/ARCHITECTURE.md).
+ * scale (see docs/ARCHITECTURE.md). Because creation is transaction-bound,
+ * an unexpected `NotificationService` failure can roll back the business
+ * action it accompanies — acceptable now since this is a local DB insert
+ * with no external I/O, but this must **not** carry over unchanged once
+ * SMTP/email is added in a later phase (an external mail failure must never
+ * roll back a real business action) — see docs/BUSINESS_RULES.md section 8.
  */
 class NotificationService
 {
@@ -222,6 +231,30 @@ class NotificationService
             type: 'assessment',
             priority: 'normal',
             actionUrl: $this->studentQuizPath($assessmentId),
+        );
+    }
+
+    /**
+     * Student-facing: the student's own quiz submission has been graded and
+     * a result is available. Distinct from `notifyQuizCompleted()` below,
+     * which is the organization-facing counterpart of the same underlying
+     * event (Phase 7A-2) — kept as two methods rather than one shared call
+     * because the copy/recipient genuinely differ, the same reasoning
+     * `notifyOfferAccepted()`/`notifyOfferDeclined()` already follow for
+     * their own two-sided events.
+     */
+    public function notifyQuizResultAvailable(
+        User $studentUser,
+        string $opportunityTitle,
+        int $applicationId,
+    ): Notification {
+        return $this->create(
+            $studentUser,
+            'Quiz Result Available',
+            "Your quiz result for {$opportunityTitle} is now available.",
+            type: 'assessment',
+            priority: 'normal',
+            actionUrl: $this->studentApplicationPath($applicationId),
         );
     }
 

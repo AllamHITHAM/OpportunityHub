@@ -5,13 +5,19 @@ namespace App\Http\Controllers\Student;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Student\ApplyToOpportunityRequest;
 use App\Models\Opportunity;
+use App\Services\NotificationService;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 
 class ApplicationController extends Controller
 {
+    public function __construct(private readonly NotificationService $notifications)
+    {
+    }
+
     public function store(ApplyToOpportunityRequest $request, Opportunity $opportunity): JsonResponse
     {
         $studentProfile = $request->user()->studentProfile;
@@ -56,10 +62,25 @@ class ApplicationController extends Controller
         }
 
         try {
-            $application = $studentProfile->applications()->create([
-                ...$request->validated(),
-                'opportunity_id' => $opportunity->id,
-            ]);
+            // Phase 7A-2: notifies the organization in the same transaction
+            // as the Application insert -- a rolled-back duplicate-apply
+            // race (see the QueryException catch below) must never leave a
+            // stray "New Application" notification behind for an
+            // application that doesn't actually exist.
+            $application = DB::transaction(function () use ($request, $opportunity, $studentProfile) {
+                $created = $studentProfile->applications()->create([
+                    ...$request->validated(),
+                    'opportunity_id' => $opportunity->id,
+                ]);
+
+                $this->notifications->notifyApplicationSubmitted(
+                    $opportunity->organizationProfile->user,
+                    $opportunity->title,
+                    $created->id,
+                );
+
+                return $created;
+            });
         } catch (QueryException $e) {
             return response()->json([
                 'success' => false,

@@ -36,6 +36,10 @@ use Illuminate\Support\Facades\DB;
  */
 class AssessmentService
 {
+    public function __construct(private readonly NotificationService $notifications)
+    {
+    }
+
     /**
      * `interview_scheduled` stays allowed here purely for legacy rows that
      * reached that status without a real Assessment ever being created
@@ -82,6 +86,21 @@ class AssessmentService
                 $assessment->interview()->create($interviewData);
 
                 $this->transitionToInAssessment($application);
+
+                // Phase 7A-2: emitted once, from this shared service
+                // boundary -- both `Organization\InterviewController::store()`
+                // (the legacy dedicated route) and
+                // `Organization\AssessmentController::store()` (the generic
+                // `type=interview` route) delegate here, so notifying from
+                // either controller instead would risk a double
+                // notification for the same interview if a future change
+                // ever called both. This is the one place `type=interview`
+                // Assessment creation actually happens.
+                $this->notifications->notifyInterviewScheduled(
+                    $application->studentProfile->user,
+                    $application->opportunity->title,
+                    $application->id,
+                );
 
                 return $assessment;
             });

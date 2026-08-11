@@ -333,6 +333,24 @@ class NotificationServiceTest extends TestCase
         $this->assertSame('/student/assessments/9/quiz', $notification->action_url);
     }
 
+    public function test_notify_quiz_result_available(): void
+    {
+        $studentUser = $this->studentUser();
+
+        $notification = $this->notifications->notifyQuizResultAvailable(
+            $studentUser,
+            'Backend Developer',
+            applicationId: 5,
+        );
+
+        $this->assertSame($studentUser->id, $notification->user_id);
+        $this->assertSame('Quiz Result Available', $notification->title);
+        $this->assertSame('Your quiz result for Backend Developer is now available.', $notification->message);
+        $this->assertSame('assessment', $notification->type);
+        $this->assertSame('normal', $notification->priority);
+        $this->assertSame('/student/applications/5', $notification->action_url);
+    }
+
     public function test_notify_quiz_completed(): void
     {
         $organizationUser = $this->organizationUser();

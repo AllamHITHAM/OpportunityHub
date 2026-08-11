@@ -355,7 +355,7 @@ class SendOfferTest extends TestCase
         }
         $this->assertNotNull($unrelatedViolation);
 
-        $service = new OfferService();
+        $service = app(OfferService::class);
         $method = new ReflectionMethod(OfferService::class, 'isDuplicateOfferViolation');
         $method->setAccessible(true);
 
