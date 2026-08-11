@@ -2,8 +2,16 @@
 
 namespace Tests\Feature\Notifications;
 
+use App\Mail\ApplicationRejectedMail;
+use App\Mail\InterviewRescheduledMail;
+use App\Mail\InterviewScheduledMail;
+use App\Mail\OfferAcceptedMail;
+use App\Mail\OfferDeclinedMail;
 use App\Mail\OfferReceivedMail;
+use App\Mail\QuizAvailableMail;
 use App\Models\Application;
+use App\Models\Interview;
+use App\Models\Notification;
 use App\Models\Opportunity;
 use App\Models\OrganizationProfile;
 use App\Models\StudentProfile;
@@ -23,6 +31,13 @@ use Tests\TestCase;
  * wrong-owner/ineligible/duplicate request, and never surviving a
  * transaction rollback. Mirrors `WorkflowNotificationTest`'s own structure/
  * helper conventions (Phase 7A-2) for the same event.
+ *
+ * Extended Phase 7A-4.2 with the remaining six workflow events (Interview
+ * Scheduled/Rescheduled, Quiz Available, Application Rejected, Offer
+ * Accepted/Declined) plus an explicit in-app-only regression section
+ * proving the four events that deliberately stay in-app-only (Application
+ * Submitted/Shortlisted, Quiz Completed, Quiz Result Available) still queue
+ * nothing.
  *
  * `Mail::fake()` is used for every test except the rollback one -- see that
  * test's own doc comment for why it deliberately does NOT use `Mail::fake()`.
@@ -230,6 +245,374 @@ class WorkflowEmailTest extends TestCase
         $this->assertDatabaseCount('notifications', 0);
     }
 
+    // ===================================================================
+    // A. Interview Scheduled (Phase 7A-4.2)
+    // ===================================================================
+
+    public function test_scheduling_an_interview_queues_interview_scheduled_to_the_student(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $student = $this->studentWithProfileAndCv();
+        $application = $this->applicationForStudent($opportunity, $student, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+        $this->postJson("/api/organization/applications/{$application->id}/interview", $this->interviewPayload())
+            ->assertStatus(201);
+
+        Mail::assertQueued(
+            InterviewScheduledMail::class,
+            fn (InterviewScheduledMail $mail) => $mail->hasTo($student->user->email)
+                && $mail->opportunityTitle === 'Backend Developer',
+        );
+        Mail::assertQueuedCount(1);
+    }
+
+    /**
+     * `Organization\AssessmentController::store()` (generic `type=interview`)
+     * delegates to the exact same `AssessmentService::createInterviewAssessment()`
+     * the legacy dedicated route above does -- the email must still queue
+     * exactly once, proving it's emitted from the shared service boundary,
+     * matching `WorkflowNotificationTest`'s own equivalent proof for the
+     * in-app Notification.
+     */
+    public function test_the_generic_assessment_endpoint_also_queues_exactly_one_interview_scheduled_email(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $student = $this->studentWithProfileAndCv();
+        $application = $this->applicationForStudent($opportunity, $student, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+        $this->postJson("/api/organization/applications/{$application->id}/assessments", [
+            'type' => 'interview',
+            'interview' => $this->interviewPayload(),
+        ])->assertStatus(201);
+
+        Mail::assertQueuedCount(1);
+        Mail::assertQueued(InterviewScheduledMail::class);
+    }
+
+    public function test_failed_interview_creation_queues_no_email(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $student = $this->studentWithProfileAndCv();
+        // `pending` is not an allowed source status for Assessment creation.
+        $application = $this->applicationForStudent($opportunity, $student, 'pending');
+
+        Sanctum::actingAs($org->user);
+        $this->postJson("/api/organization/applications/{$application->id}/interview", $this->interviewPayload())
+            ->assertStatus(422);
+
+        Mail::assertNothingQueued();
+    }
+
+    // ===================================================================
+    // B. Interview Rescheduled (Phase 7A-4.2)
+    // ===================================================================
+
+    public function test_a_real_schedule_change_queues_interview_rescheduled_to_the_student(): void
+    {
+        [$org, $student, , $interview] = $this->scheduledInterview();
+
+        Sanctum::actingAs($org->user);
+        $this->putJson("/api/organization/interviews/{$interview->id}", array_merge(
+            $this->interviewPayload(),
+            ['scheduled_at' => now()->addDays(10)->toDateTimeString()],
+        ))->assertStatus(200);
+
+        Mail::assertQueued(
+            InterviewRescheduledMail::class,
+            fn (InterviewRescheduledMail $mail) => $mail->hasTo($student->user->email),
+        );
+        Mail::assertQueuedCount(1);
+    }
+
+    public function test_idempotent_update_with_the_same_scheduling_data_queues_no_email(): void
+    {
+        [$org, , , $interview] = $this->scheduledInterview();
+
+        Sanctum::actingAs($org->user);
+        // The exact same interview_type/scheduled_at already on the row --
+        // only interviewer_name (not rescheduling-relevant) changes.
+        $this->putJson("/api/organization/interviews/{$interview->id}", array_merge(
+            $this->interviewPayload(),
+            [
+                'scheduled_at' => $interview->scheduled_at->toDateTimeString(),
+                'interviewer_name' => 'Jane Recruiter',
+            ],
+        ))->assertStatus(200);
+
+        Mail::assertNothingQueued();
+    }
+
+    public function test_wrong_ownership_update_queues_no_email(): void
+    {
+        [, , , $interview] = $this->scheduledInterview();
+        $otherOrg = $this->approvedOrganization();
+
+        Sanctum::actingAs($otherOrg->user);
+        $this->putJson("/api/organization/interviews/{$interview->id}", array_merge(
+            $this->interviewPayload(),
+            ['scheduled_at' => now()->addDays(10)->toDateTimeString()],
+        ))->assertStatus(404);
+
+        Mail::assertNothingQueued();
+    }
+
+    // ===================================================================
+    // C. Quiz Published (Phase 7A-4.2)
+    // ===================================================================
+
+    public function test_publishing_a_quiz_queues_quiz_available_to_the_student(): void
+    {
+        [$org, $student, , $quiz] = $this->draftQuizWithOneQuestion();
+
+        Sanctum::actingAs($org->user);
+        $this->putJson("/api/organization/quizzes/{$quiz->id}/publish")->assertStatus(200);
+
+        Mail::assertQueued(
+            QuizAvailableMail::class,
+            fn (QuizAvailableMail $mail) => $mail->hasTo($student->user->email)
+                && $mail->opportunityTitle === 'Backend Developer',
+        );
+        Mail::assertQueuedCount(1);
+    }
+
+    public function test_failed_publish_queues_no_email(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $student = $this->studentWithProfileAndCv();
+        $application = $this->applicationForStudent($opportunity, $student, 'in_assessment');
+        [, $quiz] = $this->quizFor($application, 'draft');
+        // Zero questions -- publish is rejected.
+
+        Sanctum::actingAs($org->user);
+        $this->putJson("/api/organization/quizzes/{$quiz->id}/publish")->assertStatus(422);
+
+        Mail::assertNothingQueued();
+    }
+
+    public function test_already_published_queues_no_additional_email(): void
+    {
+        [$org, , , $quiz] = $this->draftQuizWithOneQuestion();
+
+        Sanctum::actingAs($org->user);
+        $this->putJson("/api/organization/quizzes/{$quiz->id}/publish")->assertStatus(200);
+        Mail::assertQueuedCount(1);
+
+        $this->putJson("/api/organization/quizzes/{$quiz->id}/publish")->assertStatus(422);
+
+        Mail::assertQueuedCount(1);
+    }
+
+    // ===================================================================
+    // D. Application Rejected (Phase 7A-4.2)
+    // ===================================================================
+
+    public function test_rejecting_an_application_queues_application_rejected_to_the_student(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $student = $this->studentWithProfileAndCv();
+        $application = $this->applicationForStudent($opportunity, $student, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+        $this->putJson("/api/organization/applications/{$application->id}/status", [
+            'status' => 'rejected',
+        ])->assertStatus(200);
+
+        Mail::assertQueued(
+            ApplicationRejectedMail::class,
+            fn (ApplicationRejectedMail $mail) => $mail->hasTo($student->user->email)
+                && $mail->opportunityTitle === 'Backend Developer',
+        );
+        Mail::assertQueuedCount(1);
+    }
+
+    public function test_repeated_rejected_request_queues_no_duplicate_email(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $student = $this->studentWithProfileAndCv();
+        $application = $this->applicationForStudent($opportunity, $student, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+        $this->putJson("/api/organization/applications/{$application->id}/status", [
+            'status' => 'rejected',
+        ])->assertStatus(200);
+        Mail::assertQueuedCount(1);
+
+        $this->putJson("/api/organization/applications/{$application->id}/status", [
+            'status' => 'rejected',
+        ])->assertStatus(200);
+
+        Mail::assertQueuedCount(1);
+    }
+
+    public function test_rejecting_another_organizations_application_queues_no_email(): void
+    {
+        $orgA = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($orgA);
+        $student = $this->studentWithProfileAndCv();
+        $application = $this->applicationForStudent($opportunity, $student, 'shortlisted');
+
+        $orgB = $this->approvedOrganization();
+        Sanctum::actingAs($orgB->user);
+        $this->putJson("/api/organization/applications/{$application->id}/status", [
+            'status' => 'rejected',
+        ])->assertStatus(404);
+
+        Mail::assertNothingQueued();
+    }
+
+    // ===================================================================
+    // E. Offer Accepted (Phase 7A-4.2)
+    // ===================================================================
+
+    public function test_accepting_an_offer_queues_offer_accepted_to_the_organization(): void
+    {
+        [$application, $offer] = $this->sentOffer();
+        // The Offer Received email from setup must never leak into this
+        // test's own assertions.
+        Mail::fake();
+
+        Sanctum::actingAs($application->studentProfile->user);
+        $this->putJson("/api/student/offers/{$offer->id}/accept")->assertStatus(200);
+
+        $organizationEmail = $application->opportunity->organizationProfile->user->email;
+        Mail::assertQueued(
+            OfferAcceptedMail::class,
+            fn (OfferAcceptedMail $mail) => $mail->hasTo($organizationEmail)
+                && $mail->studentName === $application->studentProfile->user->name,
+        );
+        Mail::assertQueuedCount(1);
+    }
+
+    public function test_second_response_queues_no_additional_offer_accepted_email(): void
+    {
+        [$application, $offer] = $this->sentOffer();
+        Mail::fake();
+
+        Sanctum::actingAs($application->studentProfile->user);
+        $this->putJson("/api/student/offers/{$offer->id}/accept")->assertStatus(200);
+        Mail::assertQueuedCount(1);
+
+        $this->putJson("/api/student/offers/{$offer->id}/accept")->assertStatus(409);
+
+        Mail::assertQueuedCount(1);
+    }
+
+    // ===================================================================
+    // F. Offer Declined (Phase 7A-4.2)
+    // ===================================================================
+
+    public function test_declining_an_offer_queues_offer_declined_to_the_organization(): void
+    {
+        [$application, $offer] = $this->sentOffer();
+        Mail::fake();
+
+        Sanctum::actingAs($application->studentProfile->user);
+        $this->putJson("/api/student/offers/{$offer->id}/decline")->assertStatus(200);
+
+        $organizationEmail = $application->opportunity->organizationProfile->user->email;
+        Mail::assertQueued(
+            OfferDeclinedMail::class,
+            fn (OfferDeclinedMail $mail) => $mail->hasTo($organizationEmail)
+                && $mail->studentName === $application->studentProfile->user->name,
+        );
+        Mail::assertQueuedCount(1);
+    }
+
+    public function test_second_response_queues_no_additional_offer_declined_email(): void
+    {
+        [$application, $offer] = $this->sentOffer();
+        Mail::fake();
+
+        Sanctum::actingAs($application->studentProfile->user);
+        $this->putJson("/api/student/offers/{$offer->id}/decline")->assertStatus(200);
+        Mail::assertQueuedCount(1);
+
+        $this->putJson("/api/student/offers/{$offer->id}/decline")->assertStatus(409);
+
+        Mail::assertQueuedCount(1);
+    }
+
+    // ===================================================================
+    // G. In-app-only regression (Phase 7A-4.2) -- these four events must
+    // continue to create their in-app Notification exactly as before, and
+    // must never queue any email. Explicit, not just "absence of a test" --
+    // prevents accidental email-spam expansion in a future change.
+    // ===================================================================
+
+    public function test_application_submitted_creates_a_notification_but_queues_no_email(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $student = $this->studentWithProfileAndCv();
+
+        Sanctum::actingAs($student->user);
+        $this->postJson("/api/opportunities/{$opportunity->id}/apply", [
+            'cv_id' => $student->cv->id,
+        ])->assertStatus(201);
+
+        $this->assertDatabaseCount('notifications', 1);
+        $this->assertSame('New Application', Notification::first()->title);
+        Mail::assertNothingQueued();
+    }
+
+    public function test_application_shortlisted_creates_a_notification_but_queues_no_email(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $student = $this->studentWithProfileAndCv();
+        $application = $this->applicationForStudent($opportunity, $student, 'pending');
+
+        Sanctum::actingAs($org->user);
+        $this->putJson("/api/organization/applications/{$application->id}/status", [
+            'status' => 'shortlisted',
+        ])->assertStatus(200);
+
+        $this->assertDatabaseCount('notifications', 1);
+        $this->assertSame('Application Shortlisted', Notification::first()->title);
+        Mail::assertNothingQueued();
+    }
+
+    public function test_quiz_completed_organization_notification_queues_no_email(): void
+    {
+        $scenario = $this->twoQuestionScenario();
+        $this->startQuiz($scenario);
+
+        $this->submitQuiz($scenario, [
+            ['question_id' => $scenario['mcq']->id, 'answer' => 'Paris'],
+            ['question_id' => $scenario['tf']->id, 'answer' => 'True'],
+        ])->assertStatus(200);
+
+        $organizationNotification = Notification::where('user_id', $scenario['org']->user->id)->firstOrFail();
+        $this->assertSame('Quiz Completed', $organizationNotification->title);
+        Mail::assertNothingQueued();
+    }
+
+    public function test_quiz_result_available_student_notification_queues_no_email(): void
+    {
+        $scenario = $this->twoQuestionScenario();
+        $this->startQuiz($scenario);
+
+        $this->submitQuiz($scenario, [
+            ['question_id' => $scenario['mcq']->id, 'answer' => 'Paris'],
+            ['question_id' => $scenario['tf']->id, 'answer' => 'True'],
+        ])->assertStatus(200);
+
+        $studentNotification = Notification::where('user_id', $scenario['student']->user->id)->firstOrFail();
+        $this->assertSame('Quiz Result Available', $studentNotification->title);
+        // Two Notifications exist (student + organization, see
+        // WorkflowNotificationTest's own equivalent test), but zero emails
+        // -- neither Quiz Completed nor Quiz Result Available queues one.
+        Mail::assertNothingQueued();
+    }
+
     // ---------------------------------------------------------------
     // Helpers -- mirror WorkflowNotificationTest's own conventions.
     // ---------------------------------------------------------------
@@ -294,5 +677,169 @@ class WorkflowEmailTest extends TestCase
         $application->save();
 
         return $application;
+    }
+
+    private function interviewPayload(array $overrides = []): array
+    {
+        return array_merge([
+            'interview_type' => 'online',
+            'scheduled_at' => now()->addDays(3)->toDateTimeString(),
+            'meeting_link' => 'https://meet.example.com/room',
+        ], $overrides);
+    }
+
+    /**
+     * @return array{0: object, 1: object, 2: Application, 3: Interview}
+     */
+    private function scheduledInterview(): array
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $student = $this->studentWithProfileAndCv();
+        $application = $this->applicationForStudent($opportunity, $student, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+        $response = $this->postJson(
+            "/api/organization/applications/{$application->id}/interview",
+            $this->interviewPayload(),
+        );
+        $response->assertStatus(201);
+
+        $interview = Interview::findOrFail($response->json('data.id'));
+        // The "interview scheduled" email from setup must never leak into
+        // a reschedule test's own assertions.
+        Mail::fake();
+
+        return [$org, $student, $application, $interview];
+    }
+
+    /**
+     * @return array{0: \App\Models\Assessment, 1: \App\Models\Quiz}
+     */
+    private function quizFor(Application $application, string $status, int $passingScore = 50, ?int $timeLimitMinutes = null): array
+    {
+        $assessment = $application->assessment()->create([
+            'type' => 'quiz',
+            'status' => $status === 'published' ? 'scheduled' : 'pending',
+            'result' => null,
+        ]);
+
+        $quiz = $assessment->quiz()->create([
+            'title' => 'Backend Fundamentals',
+            'time_limit_minutes' => $timeLimitMinutes,
+            'passing_score' => $passingScore,
+            'status' => $status,
+        ]);
+
+        return [$assessment, $quiz];
+    }
+
+    /**
+     * @return array{0: object, 1: object, 2: \App\Models\Assessment, 3: \App\Models\Quiz}
+     */
+    private function draftQuizWithOneQuestion(): array
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $student = $this->studentWithProfileAndCv();
+        $application = $this->applicationForStudent($opportunity, $student, 'in_assessment');
+        [$assessment, $quiz] = $this->quizFor($application, 'draft');
+
+        $quiz->questions()->create([
+            'prompt' => 'What is the capital of France?',
+            'type' => 'multiple_choice',
+            'options' => ['Paris', 'London', 'Berlin'],
+            'correct_answer' => 'Paris',
+            'points' => 1,
+            'position' => 0,
+        ]);
+
+        return [$org, $student, $assessment, $quiz];
+    }
+
+    /**
+     * A published quiz with one 1-point multiple_choice question ("Paris")
+     * and one 1-point true_false question ("True"). Mirrors
+     * `WorkflowNotificationTest::twoQuestionScenario()`'s exact shape.
+     *
+     * @return array{org: object, student: object, application: Application, assessment: \App\Models\Assessment, quiz: \App\Models\Quiz, mcq: \App\Models\Question, tf: \App\Models\Question}
+     */
+    private function twoQuestionScenario(int $passingScore = 50, ?int $timeLimitMinutes = null): array
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $student = $this->studentWithProfileAndCv();
+        $application = $this->applicationForStudent($opportunity, $student, 'in_assessment');
+        [$assessment, $quiz] = $this->quizFor($application, 'published', $passingScore, $timeLimitMinutes);
+
+        $mcq = $quiz->questions()->create([
+            'prompt' => 'What is the capital of France?',
+            'type' => 'multiple_choice',
+            'options' => ['Paris', 'London', 'Berlin'],
+            'correct_answer' => 'Paris',
+            'points' => 1,
+            'position' => 0,
+        ]);
+
+        $tf = $quiz->questions()->create([
+            'prompt' => 'The sky is blue.',
+            'type' => 'true_false',
+            'correct_answer' => 'True',
+            'points' => 1,
+            'position' => 1,
+        ]);
+
+        return [
+            'org' => $org,
+            'student' => $student,
+            'application' => $application,
+            'assessment' => $assessment->fresh('application'),
+            'quiz' => $quiz,
+            'mcq' => $mcq,
+            'tf' => $tf,
+        ];
+    }
+
+    private function startQuiz(array $scenario): void
+    {
+        Sanctum::actingAs($scenario['student']->user);
+        $this->postJson("/api/student/quizzes/{$scenario['quiz']->id}/start")->assertStatus(201);
+    }
+
+    private function submitQuiz(array $scenario, array $answers): \Illuminate\Testing\TestResponse
+    {
+        Sanctum::actingAs($scenario['student']->user);
+
+        return $this->postJson("/api/student/quizzes/{$scenario['quiz']->id}/submit", [
+            'answers' => $answers,
+        ]);
+    }
+
+    /**
+     * A `sent` Offer on an eligible, completed-Assessment application --
+     * shared setup for every accept/decline test.
+     *
+     * @return array{0: Application, 1: \App\Models\Offer}
+     */
+    private function sentOffer(): array
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $student = $this->studentWithProfileAndCv();
+        $application = $this->applicationForStudent($opportunity, $student, 'in_assessment');
+        $application->assessment()->create([
+            'type' => 'interview',
+            'status' => 'completed',
+            'result' => 'passed',
+            'completed_at' => now(),
+        ]);
+
+        Sanctum::actingAs($org->user);
+        $response = $this->postJson("/api/organization/applications/{$application->id}/offer", []);
+        $response->assertStatus(201);
+
+        $offer = \App\Models\Offer::findOrFail($response->json('data.id'));
+
+        return [$application->fresh(), $offer];
     }
 }

@@ -1,0 +1,29 @@
+<x-mail::message>
+# Interview Scheduled
+
+Hi {{ $studentName }},
+
+An interview has been scheduled for your application to **{{ $opportunityTitle }}**.
+
+**Type:** {{ $interviewTypeLabel }}
+**When:** {{ $scheduledAt->format('F j, Y \a\t g:i A') }}
+@if ($durationMinutes)
+**Duration:** {{ $durationMinutes }} minutes
+@endif
+@if ($interviewType === 'online' && $meetingLink)
+**Meeting link:** {{ $meetingLink }}
+@endif
+@if ($interviewType === 'onsite' && $location)
+**Location:** {{ $location }}
+@endif
+@if ($interviewerName)
+**Interviewer:** {{ $interviewerName }}
+@endif
+
+<x-mail::button :url="$ctaUrl">
+View Application
+</x-mail::button>
+
+Thanks,<br>
+{{ config('app.name') }}
+</x-mail::message>

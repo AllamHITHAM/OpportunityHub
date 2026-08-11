@@ -993,6 +993,124 @@ provider is configured, no live email is ever sent.
 
 ---
 
+## Remaining Workflow Emails (Phase 7A-4.2)
+
+Extends the Phase 7A-4.1 queued-email foundation to the remaining six
+approved events, reusing the exact same pattern (`QueuedTransactionalMail`
+base class, `NotificationService` → `EmailService` → queued Mailable,
+after-commit semantics) with **zero changes to the foundation itself** —
+`app/Mail/QueuedTransactionalMail.php` is untouched by this phase.
+**Architecture only, still**: `MAIL_MAILER` stays `log`, no external SMTP
+provider is configured, no live email is ever sent.
+
+- **Six new Mailables**, all extending `QueuedTransactionalMail` unchanged
+  (inheriting `ShouldQueueAfterCommit`, the `emails` queue, `tries=3`,
+  `timeout=60`, `backoff=[30,300,1800]` with no per-class overrides):
+  `InterviewScheduledMail`, `InterviewRescheduledMail`, `QuizAvailableMail`,
+  `ApplicationRejectedMail`, `OfferAcceptedMail`, `OfferDeclinedMail`. Each
+  is constructed from primitives, matching `OfferReceivedMail`'s own
+  precedent — never the `Interview`/`Quiz`/`Application`/`Opportunity`
+  models themselves.
+- **`App\Services\EmailService` gained six new methods**, one per Mailable
+  (`sendInterviewScheduledEmail`, `sendInterviewRescheduledEmail`,
+  `sendQuizAvailableEmail`, `sendApplicationRejectedEmail`,
+  `sendOfferAcceptedEmail`, `sendOfferDeclinedEmail`) — deliberately six
+  explicit methods, not a generic `sendByEventType()` dispatcher, since each
+  event's required data genuinely differs. Two new private URL helpers
+  (`studentQuizUrl()`, `organizationApplicationUrl()`) mirror
+  `NotificationService`'s own `studentQuizPath()`/`organizationApplicationPath()`
+  path helpers, just prefixed with `config('app.frontend_url')`.
+- **`NotificationService` gained email calls in six more convenience
+  methods** (`notifyApplicationRejected`, `notifyInterviewScheduled`,
+  `notifyInterviewRescheduled`, `notifyQuizPublished`, `notifyOfferAccepted`,
+  `notifyOfferDeclined`) — each unchanged in its existing in-app
+  Notification copy/type/priority/action_url, now also calling the matching
+  `EmailService` method after creating that Notification. The four
+  deliberately-in-app-only methods (`notifyApplicationSubmitted`,
+  `notifyApplicationShortlisted`, `notifyQuizCompleted`,
+  `notifyQuizResultAvailable`) are untouched — see
+  docs/BUSINESS_RULES.md section 8 for the full eligibility matrix and the
+  frequency/actionability reasoning behind it.
+- **Two convenience methods needed one additional parameter, three call
+  sites needed a one-line change to supply it** — the "extend the signature
+  minimally, update the existing caller" path, not a new call site or a
+  large Eloquent graph:
+  - `notifyInterviewScheduled(..., Interview $interview)` — the freshly-
+    created Interview (`AssessmentService::createInterviewAssessment()` now
+    captures `$assessment->interview()->create($interviewData)` into a
+    variable instead of discarding it).
+  - `notifyInterviewRescheduled(..., Interview $interview)` — the already-
+    updated Interview (`Organization\InterviewController::update()` already
+    had `$interview` in scope).
+  - `notifyQuizPublished(..., Quiz $quiz)` — the just-published Quiz
+    (`Organization\QuizController::publish()` already had `$quiz` in
+    scope).
+  - `notifyApplicationRejected`/`notifyOfferAccepted`/`notifyOfferDeclined`
+    needed **no** signature change — their existing arguments (student
+    user, opportunity title, application ID; organization user, student
+    name for the latter two) were already everything their email needs.
+- **A real latent bug surfaced and was fixed during this phase**:
+  `interviews.duration_minutes` has a DB-level default (`60`), but a
+  freshly-`create()`d Eloquent model does not reflect a DB-applied default
+  in memory without an explicit `fresh()`/`refresh()` — so
+  `$interview->duration_minutes` is `null` immediately after creation
+  whenever the caller didn't explicitly supply it (true for every
+  `interviewPayload()` in this project's own tests, and for any real
+  request that omits it, since it's optional in
+  `StoreInterviewRequest`/`UpdateInterviewRequest`). Rather than forcing an
+  extra `fresh()` query solely for email content, `durationMinutes` is
+  nullable end-to-end (`EmailService` → `InterviewScheduledMail`/
+  `InterviewRescheduledMail` → the Blade view's own `@if ($durationMinutes)`
+  guard) — which also matches this event's own content spec ("duration if
+  available").
+- **Content sourced directly from already-confirmed-safe fields**:
+  `interviewer_name` is included because docs/API.md's "Student-visible
+  Interview fields" note already confirms it (unlike
+  `interviewer_email`/`rating`/`decision`/`company_feedback`/`notes`) is
+  returned to students today; `Quiz.passing_score` is included for the
+  same reason ("a deliberate v1 product decision: the passing threshold is
+  a transparent, known-in-advance assessment rule, not a grading
+  internal" — docs/API.md's "Student-visible Quiz fields" note).
+  `Quiz.time_limit_minutes` is nullable (a quiz may have no time limit) and
+  omitted from the email when absent. Application Rejected and Offer
+  Declined both deliberately invent no reason — v1 has no student-visible
+  rejection-reason field and no Offer-decline-reason field at all.
+- **Organization-facing Mailables (`OfferAcceptedMail`/`OfferDeclinedMail`)
+  distinguish the greeting target from the subject of the email**:
+  `$recipientName` (the organization account's own name, from
+  `$organizationUser->name`) greets the reader; `$studentName` (the
+  applicant, never the recipient) is mentioned in the body — the two are
+  never conflated.
+- **Constructor-injection ripple**: three `tests/Unit/Services/NotificationServiceTest.php`
+  tests (`test_notify_interview_scheduled`, `test_notify_interview_rescheduled`,
+  `test_notify_quiz_published`) called their respective convenience method
+  directly with the old (pre-this-phase) argument list — fixed by passing a
+  small, never-persisted `Interview`/`Quiz` instance (`new Interview([...])`/
+  `new Quiz([...])`), the same "unsaved model as a test double" pattern
+  `test_notify_offer_sent` already established in Phase 7A-4.1 for `Offer`.
+  No other test or production call site constructs `NotificationService`/
+  `EmailService` directly — both are resolved through the container
+  everywhere else (`app(NotificationService::class)`, or real dependency
+  injection via the framework).
+- **Tested via**: six new `tests/Unit/Mail/*Test.php` files (one per new
+  Mailable — subject, greeting, opportunity title, CTA text/URL, every
+  optional-field present/absent branch, and, critically, that every
+  category of forbidden content listed above is absent from the actual
+  rendered output); `tests/Unit/Services/EmailServiceTest.php` extended
+  with 16 new tests (one method, one recipient/CTA/data-forwarding group per
+  new `EmailService` method); `tests/Feature/Notifications/WorkflowEmailTest.php`
+  extended with 20 new tests — six new event groups (A–F, one real HTTP
+  call per scenario: success queues exactly one email of the right class to
+  the right recipient; wrong-ownership/failed/ineligible/duplicate/
+  idempotent/logistics-only requests queue none) plus a seventh explicit
+  in-app-only regression group (G) proving all four deliberately-excluded
+  events still create their in-app Notification but queue zero email. The
+  pre-existing Phase 7A-4.1 Offer Received tests in the same file needed no
+  changes and still pass unmodified — proving the extension didn't disturb
+  the pilot.
+
+---
+
 ## Development Flow
 
 Database

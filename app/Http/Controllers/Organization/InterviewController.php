@@ -133,6 +133,7 @@ class InterviewController extends Controller
                 $application->studentProfile->user,
                 $application->opportunity->title,
                 $application->id,
+                $interview,
             );
         });
 

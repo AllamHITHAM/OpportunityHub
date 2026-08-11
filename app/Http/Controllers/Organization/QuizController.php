@@ -196,12 +196,17 @@ class QuizController extends Controller
 
             // Phase 7A-2: only reachable once, since the draft-only guard
             // above already 422s a second publish attempt -- exactly one
-            // notification per real draft -> published transition.
+            // notification per real draft -> published transition. Phase
+            // 7A-4.2: $quiz is passed through so NotificationService can
+            // forward passing_score/time_limit_minutes to EmailService for
+            // the "Quiz Available" email -- still exactly one call to
+            // notifyQuizPublished().
             $application = $quiz->assessment->application;
             $this->notifications->notifyQuizPublished(
                 $application->studentProfile->user,
                 $application->opportunity->title,
                 $quiz->assessment_id,
+                $quiz,
             );
         });
 

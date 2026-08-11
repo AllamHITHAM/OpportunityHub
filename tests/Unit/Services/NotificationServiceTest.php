@@ -2,7 +2,9 @@
 
 namespace Tests\Unit\Services;
 
+use App\Models\Interview;
 use App\Models\Offer;
+use App\Models\Quiz;
 use App\Models\User;
 use App\Services\NotificationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -282,11 +284,21 @@ class NotificationServiceTest extends TestCase
     public function test_notify_interview_scheduled(): void
     {
         $studentUser = $this->studentUser();
+        // Never persisted -- notifyInterviewScheduled() only reads
+        // scheduling fields off it (Phase 7A-4.2, forwarded to
+        // EmailService), it does not save/mutate the Interview itself.
+        $interview = new Interview([
+            'interview_type' => 'online',
+            'scheduled_at' => now()->addDays(3),
+            'duration_minutes' => 60,
+            'meeting_link' => 'https://meet.example.com/room',
+        ]);
 
         $notification = $this->notifications->notifyInterviewScheduled(
             $studentUser,
             'Backend Developer',
             applicationId: 5,
+            interview: $interview,
         );
 
         $this->assertSame($studentUser->id, $notification->user_id);
@@ -303,11 +315,18 @@ class NotificationServiceTest extends TestCase
     public function test_notify_interview_rescheduled(): void
     {
         $studentUser = $this->studentUser();
+        $interview = new Interview([
+            'interview_type' => 'online',
+            'scheduled_at' => now()->addDays(5),
+            'duration_minutes' => 45,
+            'meeting_link' => 'https://meet.example.com/room',
+        ]);
 
         $notification = $this->notifications->notifyInterviewRescheduled(
             $studentUser,
             'Backend Developer',
             applicationId: 5,
+            interview: $interview,
         );
 
         $this->assertSame($studentUser->id, $notification->user_id);
@@ -321,11 +340,17 @@ class NotificationServiceTest extends TestCase
     public function test_notify_quiz_published(): void
     {
         $studentUser = $this->studentUser();
+        $quiz = new Quiz([
+            'title' => 'Backend Fundamentals',
+            'passing_score' => 70,
+            'time_limit_minutes' => 30,
+        ]);
 
         $notification = $this->notifications->notifyQuizPublished(
             $studentUser,
             'Backend Developer',
             assessmentId: 9,
+            quiz: $quiz,
         );
 
         $this->assertSame($studentUser->id, $notification->user_id);

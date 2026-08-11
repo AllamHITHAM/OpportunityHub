@@ -2,8 +2,10 @@
 
 namespace App\Services;
 
+use App\Models\Interview;
 use App\Models\Notification;
 use App\Models\Offer;
+use App\Models\Quiz;
 use App\Models\User;
 use InvalidArgumentException;
 
@@ -36,26 +38,35 @@ use InvalidArgumentException;
  * action it accompanies — acceptable since this is a local DB insert with
  * no external I/O.
  *
- * **`EmailService` collaborator (Phase 7A-4.1).** This class remains the
- * single conceptual "which workflow event happened, who does it concern"
- * boundary — it still owns the in-app Notification's copy/type/priority/
- * action_url exactly as before. It now also decides *which* of its events
- * are important enough to also queue a transactional email, delegating the
- * actual Mailable/transport/after-commit mechanics to `EmailService`
- * (constructor-injected) rather than calling `Mail::` itself — mixing SMTP
- * transport concerns into this class would defeat the point of having a
- * separate `EmailService` at all. Only `notifyOfferSent()` queues an email
- * so far; the remaining event methods are unchanged and queue nothing
- * (Phase 7A-4.2 will extend the same pattern to them). Because
- * `EmailService::sendOfferReceivedEmail()` queues with after-commit
- * semantics (see `QueuedTransactionalMail`), calling it here — still inside
- * the same `DB::transaction()` as the Offer mutation — does not carry the
- * "an unexpected failure rolls back the business action" risk the in-app
- * Notification insert above still has: a queue-dispatch failure raises
- * immediately (see `EmailService`'s own doc comment on why that's
- * deliberate), but the actual SMTP send itself never runs until well after
- * this transaction has already committed, and its failure is isolated to
- * the queued job (see docs/BUSINESS_RULES.md section 8).
+ * **`EmailService` collaborator (Phase 7A-4.1, extended Phase 7A-4.2).**
+ * This class remains the single conceptual "which workflow event happened,
+ * who does it concern" boundary — it still owns the in-app Notification's
+ * copy/type/priority/action_url exactly as before. It now also decides
+ * *which* of its events are important enough to also queue a transactional
+ * email, delegating the actual Mailable/transport/after-commit mechanics to
+ * `EmailService` (constructor-injected) rather than calling `Mail::` itself
+ * — mixing SMTP transport concerns into this class would defeat the point
+ * of having a separate `EmailService` at all. **Seven of eleven events
+ * queue an email as of Phase 7A-4.2**: `notifyOfferSent()` (the Phase
+ * 7A-4.1 pilot), `notifyApplicationRejected()`, `notifyInterviewScheduled()`,
+ * `notifyInterviewRescheduled()`, `notifyQuizPublished()`,
+ * `notifyOfferAccepted()`, `notifyOfferDeclined()`. Four remain in-app
+ * only, unchanged and queuing nothing: `notifyApplicationSubmitted()`,
+ * `notifyApplicationShortlisted()`, `notifyQuizCompleted()`,
+ * `notifyQuizResultAvailable()` — each fires too frequently per-user
+ * (Submitted/Completed) or isn't independently actionable
+ * (Shortlisted/Result Available) to justify an email; see
+ * docs/BUSINESS_RULES.md section 8 for the full matrix and reasoning.
+ * Because every `EmailService::send*Email()` method queues with
+ * after-commit semantics (see `QueuedTransactionalMail`), calling one here
+ * — still inside the same `DB::transaction()` as the business mutation it
+ * accompanies — does not carry the "an unexpected failure rolls back the
+ * business action" risk the in-app Notification insert above still has: a
+ * queue-dispatch failure raises immediately (see `EmailService`'s own doc
+ * comment on why that's deliberate), but the actual SMTP send itself never
+ * runs until well after this transaction has already committed, and its
+ * failure is isolated to the queued job (see docs/BUSINESS_RULES.md
+ * section 8).
  */
 class NotificationService
 {
@@ -183,7 +194,7 @@ class NotificationService
         string $opportunityTitle,
         int $applicationId,
     ): Notification {
-        return $this->create(
+        $notification = $this->create(
             $studentUser,
             'Application Update',
             "Your application for {$opportunityTitle} was not selected.",
@@ -191,6 +202,14 @@ class NotificationService
             priority: 'high',
             actionUrl: $this->studentApplicationPath($applicationId),
         );
+
+        $this->emails->sendApplicationRejectedEmail(
+            $studentUser,
+            $opportunityTitle,
+            $applicationId,
+        );
+
+        return $notification;
     }
 
     // -----------------------------------------------------------------
@@ -200,13 +219,27 @@ class NotificationService
     /**
      * Student-facing: an interview was scheduled for the student's
      * application.
+     *
+     * @param  Interview  $interview  The just-created Interview (Phase
+     *                                7A-4.2) — read here only to forward its
+     *                                scheduling fields to `EmailService`;
+     *                                never persisted or altered. The in-app
+     *                                Notification's own copy/type/priority/
+     *                                action_url below is unchanged by its
+     *                                presence. Only `interview_type`,
+     *                                `scheduled_at`, `duration_minutes`,
+     *                                `meeting_link`, `location`, and
+     *                                `interviewer_name` are ever read —
+     *                                never `interviewer_email`/`rating`/
+     *                                `decision`/`notes`/`company_feedback`.
      */
     public function notifyInterviewScheduled(
         User $studentUser,
         string $opportunityTitle,
         int $applicationId,
+        Interview $interview,
     ): Notification {
-        return $this->create(
+        $notification = $this->create(
             $studentUser,
             'Interview Scheduled',
             "An interview has been scheduled for your application to {$opportunityTitle}.",
@@ -214,17 +247,39 @@ class NotificationService
             priority: 'normal',
             actionUrl: $this->studentApplicationPath($applicationId),
         );
+
+        $this->emails->sendInterviewScheduledEmail(
+            $studentUser,
+            $opportunityTitle,
+            $applicationId,
+            interviewType: $interview->interview_type,
+            scheduledAt: $interview->scheduled_at,
+            durationMinutes: $interview->duration_minutes,
+            meetingLink: $interview->meeting_link,
+            location: $interview->location,
+            interviewerName: $interview->interviewer_name,
+        );
+
+        return $notification;
     }
 
     /**
      * Student-facing: an already-scheduled interview was rescheduled.
+     *
+     * @param  Interview  $interview  The already-updated Interview (Phase
+     *                                7A-4.2, current/post-update values only
+     *                                — see `EmailService::sendInterviewRescheduledEmail()`'s
+     *                                own doc comment). Same field-safety
+     *                                notes as `notifyInterviewScheduled()`
+     *                                above apply here.
      */
     public function notifyInterviewRescheduled(
         User $studentUser,
         string $opportunityTitle,
         int $applicationId,
+        Interview $interview,
     ): Notification {
-        return $this->create(
+        $notification = $this->create(
             $studentUser,
             'Interview Rescheduled',
             "Your interview for {$opportunityTitle} has been rescheduled.",
@@ -232,6 +287,20 @@ class NotificationService
             priority: 'normal',
             actionUrl: $this->studentApplicationPath($applicationId),
         );
+
+        $this->emails->sendInterviewRescheduledEmail(
+            $studentUser,
+            $opportunityTitle,
+            $applicationId,
+            interviewType: $interview->interview_type,
+            scheduledAt: $interview->scheduled_at,
+            durationMinutes: $interview->duration_minutes,
+            meetingLink: $interview->meeting_link,
+            location: $interview->location,
+            interviewerName: $interview->interviewer_name,
+        );
+
+        return $notification;
     }
 
     // -----------------------------------------------------------------
@@ -243,12 +312,24 @@ class NotificationService
      * Points directly at the Quiz screen (not Application Details) since
      * that's the actionable target for this specific event.
      */
+    /**
+     * @param  Quiz  $quiz  The just-published Quiz (Phase 7A-4.2) — read
+     *                      here only to forward `passing_score`/
+     *                      `time_limit_minutes` to `EmailService`; never
+     *                      persisted or altered. `passing_score` is already
+     *                      student-visible today (see docs/API.md's
+     *                      "Student-visible Quiz fields" note), so this
+     *                      carries no new exposure. Never reads question
+     *                      data, `correct_answer`, or anything score/
+     *                      grading-related.
+     */
     public function notifyQuizPublished(
         User $studentUser,
         string $opportunityTitle,
         int $assessmentId,
+        Quiz $quiz,
     ): Notification {
-        return $this->create(
+        $notification = $this->create(
             $studentUser,
             'Quiz Available',
             "A quiz is now available for your application to {$opportunityTitle}.",
@@ -256,6 +337,16 @@ class NotificationService
             priority: 'normal',
             actionUrl: $this->studentQuizPath($assessmentId),
         );
+
+        $this->emails->sendQuizAvailableEmail(
+            $studentUser,
+            $opportunityTitle,
+            $assessmentId,
+            passingScore: $quiz->passing_score,
+            timeLimitMinutes: $quiz->time_limit_minutes,
+        );
+
+        return $notification;
     }
 
     /**
@@ -355,7 +446,7 @@ class NotificationService
         string $opportunityTitle,
         int $applicationId,
     ): Notification {
-        return $this->create(
+        $notification = $this->create(
             $organizationUser,
             'Offer Accepted',
             "{$studentName} accepted the offer for {$opportunityTitle}.",
@@ -363,6 +454,15 @@ class NotificationService
             priority: 'high',
             actionUrl: $this->organizationApplicationPath($applicationId),
         );
+
+        $this->emails->sendOfferAcceptedEmail(
+            $organizationUser,
+            $studentName,
+            $opportunityTitle,
+            $applicationId,
+        );
+
+        return $notification;
     }
 
     /**
@@ -374,7 +474,7 @@ class NotificationService
         string $opportunityTitle,
         int $applicationId,
     ): Notification {
-        return $this->create(
+        $notification = $this->create(
             $organizationUser,
             'Offer Declined',
             "{$studentName} declined the offer for {$opportunityTitle}.",
@@ -382,6 +482,15 @@ class NotificationService
             priority: 'high',
             actionUrl: $this->organizationApplicationPath($applicationId),
         );
+
+        $this->emails->sendOfferDeclinedEmail(
+            $organizationUser,
+            $studentName,
+            $opportunityTitle,
+            $applicationId,
+        );
+
+        return $notification;
     }
 
     // -----------------------------------------------------------------

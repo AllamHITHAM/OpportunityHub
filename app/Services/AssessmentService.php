@@ -83,7 +83,7 @@ class AssessmentService
                     'result' => null,
                 ]);
 
-                $assessment->interview()->create($interviewData);
+                $interview = $assessment->interview()->create($interviewData);
 
                 $this->transitionToInAssessment($application);
 
@@ -95,11 +95,16 @@ class AssessmentService
                 // either controller instead would risk a double
                 // notification for the same interview if a future change
                 // ever called both. This is the one place `type=interview`
-                // Assessment creation actually happens.
+                // Assessment creation actually happens. Phase 7A-4.2: the
+                // freshly-created $interview is passed through so
+                // NotificationService can forward its scheduling fields to
+                // EmailService for the "Interview Scheduled" email -- still
+                // exactly one call to notifyInterviewScheduled().
                 $this->notifications->notifyInterviewScheduled(
                     $application->studentProfile->user,
                     $application->opportunity->title,
                     $application->id,
+                    $interview,
                 );
 
                 return $assessment;
