@@ -80,6 +80,23 @@ class ApplicationController extends Controller
             ], 409);
         }
 
+        // Phase 6C-4: once an Offer exists, the Application/Offer lifecycle
+        // is owned entirely by OfferService (sendOffer/acceptOffer/
+        // declineOffer) -- this generic endpoint must never independently
+        // move the Application again, in either direction. Without this
+        // guard an organization could, e.g., reject an application whose
+        // Offer is still `sent`, producing the impossible combination
+        // Offer.status=sent + Application.status=rejected. v1 has no Offer
+        // cancel/rescind workflow, so this is a hard block, not a
+        // conditional one -- see docs/BUSINESS_RULES.md section 7b.
+        if ($application->offer()->exists()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'This application already has an offer; its status can only change through the offer accept/decline endpoints.',
+                'data' => null,
+            ], 409);
+        }
+
         $application->status = $request->validated('status');
         $application->reviewed_at = now();
         $application->save();

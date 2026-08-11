@@ -52,13 +52,61 @@ class StudentDashboardTest extends TestCase
             'pending_applications',
             'reviewed_applications',
             'shortlisted_applications',
+            'offer_sent_applications',
             'accepted_applications',
             'rejected_applications',
             'total_cvs',
             'total_skills',
             'total_interviews',
         ]]);
-        $this->assertArrayNotHasKey('offer_sent_applications', $response->json('data'));
+    }
+
+    /**
+     * Phase 6C-4: makes the final Offer funnel visible alongside the
+     * existing accepted/rejected terminal counts (see
+     * docs/BUSINESS_RULES.md section 5) -- counts only this student's own
+     * applications.
+     */
+    public function test_offer_sent_applications_count_is_correct_and_isolated_by_student(): void
+    {
+        $studentA = $this->studentWithProfile();
+        $studentB = $this->studentWithProfile();
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+
+        $this->applicationFor($studentA, $opportunity, 'offer_sent');
+        $this->applicationFor($studentA, $this->opportunityFor($org), 'offer_sent');
+        $this->applicationFor($studentA, $this->opportunityFor($org), 'in_assessment');
+        $this->applicationFor($studentB, $opportunity, 'offer_sent');
+
+        Sanctum::actingAs($studentA->user);
+        $responseA = $this->getJson('/api/student/dashboard');
+        $responseA->assertJsonPath('data.offer_sent_applications', 2);
+
+        Sanctum::actingAs($studentB->user);
+        $responseB = $this->getJson('/api/student/dashboard');
+        $responseB->assertJsonPath('data.offer_sent_applications', 1);
+    }
+
+    /**
+     * Adding `offer_sent_applications` must never change what
+     * `accepted_applications`/`rejected_applications` count.
+     */
+    public function test_accepted_and_rejected_counts_are_unchanged_by_the_new_field(): void
+    {
+        $student = $this->studentWithProfile();
+        $org = $this->approvedOrganization();
+        $this->applicationFor($student, $this->opportunityFor($org), 'accepted');
+        $this->applicationFor($student, $this->opportunityFor($org), 'rejected');
+        $this->applicationFor($student, $this->opportunityFor($org), 'offer_sent');
+
+        Sanctum::actingAs($student->user);
+
+        $response = $this->getJson('/api/student/dashboard');
+
+        $response->assertJsonPath('data.accepted_applications', 1)
+            ->assertJsonPath('data.rejected_applications', 1)
+            ->assertJsonPath('data.offer_sent_applications', 1);
     }
 
     public function test_interview_count_is_correct(): void

@@ -137,7 +137,7 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 ### GET /api/student/dashboard
 - Same middleware
-- Success: 200 — `{"data": {"total_applications": n, "pending_applications": n, "reviewed_applications": n, "shortlisted_applications": n, "accepted_applications": n, "rejected_applications": n, "total_cvs": n, "total_skills": n, "total_interviews": n}}`. Unchanged contract as of Phase 6C-0 — `accepted_applications` still counts `status = accepted` rows exactly as before; only what a *new* `accepted` row means has shifted (see docs/BUSINESS_RULES.md section 5). No `offer_sent_applications` field yet — deferred to Phase 6C-4.
+- Success: 200 — `{"data": {"total_applications": n, "pending_applications": n, "reviewed_applications": n, "shortlisted_applications": n, "offer_sent_applications": n, "accepted_applications": n, "rejected_applications": n, "total_cvs": n, "total_skills": n, "total_interviews": n}}`. `accepted_applications` still counts `status = accepted` rows exactly as before; only what a *new* `accepted` row means has shifted (see docs/BUSINESS_RULES.md section 5). **`offer_sent_applications` (Phase 6C-4)** counts this student's own `status = offer_sent` rows — making the final Offer funnel (`offer_sent` → `accepted`/`rejected`) visible alongside the two terminal counts.
 - Errors: 401, 403, 404
 
 ---
@@ -200,7 +200,7 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 ### GET /api/organization/dashboard
 - Same middleware
-- Success: 200 — `{"data": {"total_opportunities": n, "open_opportunities": n, "closed_opportunities": n, "draft_opportunities": n, "total_applications": n, "pending_applications": n, "shortlisted_applications": n, "accepted_applications": n, "rejected_applications": n, "total_interviews": n, "completed_interviews": n}}`. Unchanged contract as of Phase 6C-0 — `accepted_applications` still counts `status = accepted` rows exactly as before; only what a *new* `accepted` row means has shifted (see docs/BUSINESS_RULES.md section 5). No `offer_sent_applications` field yet — deferred to Phase 6C-4.
+- Success: 200 — `{"data": {"total_opportunities": n, "open_opportunities": n, "closed_opportunities": n, "draft_opportunities": n, "total_applications": n, "pending_applications": n, "shortlisted_applications": n, "offer_sent_applications": n, "accepted_applications": n, "rejected_applications": n, "total_interviews": n, "completed_interviews": n}}`. `accepted_applications` still counts `status = accepted` rows exactly as before; only what a *new* `accepted` row means has shifted (see docs/BUSINESS_RULES.md section 5). **`offer_sent_applications` (Phase 6C-4)** counts `status = offer_sent` rows across this organization's own opportunities — making the final Offer funnel visible alongside the two terminal counts.
 - Errors: 401, 403
 
 ---
@@ -251,8 +251,9 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 ### PUT /api/organization/applications/{application}/status
 - Same middleware
 - Body: `status` (required, in: reviewed, shortlisted, rejected — **not** `pending`/`withdrawn`). **As of Phase 6B-0, `in_assessment` and `interview_scheduled` are no longer accepted here**, and **as of Phase 6C-0, `accepted` and `offer_sent` are no longer accepted here either** — `in_assessment` and `offer_sent` must only ever be reached through their real domain workflow (Assessment creation, section 7; the Offer workflow, section 7b), `interview_scheduled` (deprecated legacy value) can no longer be fabricated with no assessment behind it, and `accepted` now means specifically "the student accepted the Offer" (only `Student\OfferController::accept()`, section 7b, may write it — see docs/BUSINESS_RULES.md section 5). Any of these four values in the request body now fails standard `in:` validation (422). Existing rows may still legitimately hold any of them — this restriction is on input only, never on what's stored or returned (see the response note below).
+- **As of Phase 6C-4, this endpoint is blocked entirely (409) once the application already has an Offer** — regardless of the Offer's own status (`sent`/`accepted`/`declined`) and regardless of which value the request body asks for (including `reviewed`/`shortlisted`/`rejected`, which are otherwise valid input). Once an Offer exists, only `OfferService` (via the Offer accept/decline endpoints) may move the Application again — see docs/BUSINESS_RULES.md section 7b.
 - Success: 200 — also sets `reviewed_at = now()` on every successful call, even if re-setting the same status.
-- Errors: 401, 403, 404, 409 ("Cannot change the status of a withdrawn application"), 422
+- Errors: 401, 403, 404, 409 ("Cannot change the status of a withdrawn application", or "This application already has an offer; its status can only change through the offer accept/decline endpoints." — Phase 6C-4), 422
 
 ---
 

@@ -20,6 +20,10 @@ class DashboardController extends Controller
             'pending_applications' => (clone $applications)->where('status', 'pending')->count(),
             'reviewed_applications' => (clone $applications)->where('status', 'reviewed')->count(),
             'shortlisted_applications' => (clone $applications)->where('status', 'shortlisted')->count(),
+            // Phase 6C-4: makes the final Offer funnel visible alongside
+            // the existing accepted/rejected terminal counts -- see
+            // docs/BUSINESS_RULES.md section 5 for what each status means.
+            'offer_sent_applications' => (clone $applications)->where('status', 'offer_sent')->count(),
             'accepted_applications' => (clone $applications)->where('status', 'accepted')->count(),
             'rejected_applications' => (clone $applications)->where('status', 'rejected')->count(),
             'total_cvs' => $studentProfile->cvs()->count(),

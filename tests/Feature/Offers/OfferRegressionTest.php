@@ -28,6 +28,12 @@ use Tests\TestCase;
  * endpoints work again, that an accepted Offer is reflected in
  * `accepted_applications` the same way any other `accepted` row already
  * was.
+ *
+ * `test_dashboards_now_expose_an_offer_sent_count()` below was updated in
+ * Phase 6C-4, which added `offer_sent_applications` to both dashboards
+ * (see `OrganizationDashboardTest`/`StudentDashboardTest` for the real
+ * count-correctness/ownership-isolation coverage) -- superseding this
+ * class's original Phase 6C-1 assertion that the field was absent.
  */
 class OfferRegressionTest extends TestCase
 {
@@ -112,22 +118,27 @@ class OfferRegressionTest extends TestCase
     }
 
     /**
-     * Introducing the Offer feature must never grow the dashboard response
-     * shape -- no `offer_sent_applications` field, on either dashboard.
+     * Phase 6C-4: `offer_sent_applications` was added to both dashboards
+     * (see `Organization\DashboardController`/`Student\DashboardController`
+     * and their own dedicated `OrganizationDashboardTest`/
+     * `StudentDashboardTest` coverage for count-correctness/ownership-
+     * isolation) -- this class only re-confirms the field now appears on
+     * both, superseding the previous Phase 6C-1 assertion that it was
+     * absent.
      */
-    public function test_dashboards_do_not_expose_an_offer_sent_count(): void
+    public function test_dashboards_now_expose_an_offer_sent_count(): void
     {
         $org = $this->approvedOrganization();
         Sanctum::actingAs($org->user);
         $orgResponse = $this->getJson('/api/organization/dashboard');
         $orgResponse->assertStatus(200);
-        $this->assertArrayNotHasKey('offer_sent_applications', $orgResponse->json('data'));
+        $this->assertArrayHasKey('offer_sent_applications', $orgResponse->json('data'));
 
         $application = $this->applicationFor($this->opportunityFor($org), 'pending');
         Sanctum::actingAs($application->studentProfile->user);
         $studentResponse = $this->getJson('/api/student/dashboard');
         $studentResponse->assertStatus(200);
-        $this->assertArrayNotHasKey('offer_sent_applications', $studentResponse->json('data'));
+        $this->assertArrayHasKey('offer_sent_applications', $studentResponse->json('data'));
     }
 
     private function approvedOrganization(): object

@@ -53,7 +53,8 @@
   - withdrawn
 - Match score is calculated after application submission.
 - **As of Phase 6C-0, `accepted` means specifically "the student accepted the Offer."** It is no longer organization-writable through the generic status endpoint — the only workflow permitted to set it is `Student\OfferController::accept()` (`App\Services\OfferService::acceptOffer()`, Phase 6C-1 — see section 7b). Pre-existing `accepted` rows from before Phase 6C-0 are untouched and remain fully valid, legacy-compatible data; the semantics shift only governs writes going forward.
-- `rejected` continues to mean the hiring process ended negatively — either the organization declined the candidate directly at any appropriate stage (section 3, section 7), or the student declined a sent Offer (`Student\OfferController::decline()`, section 7b). Both converge on the same `Application.status = rejected`; only the actor and, for the Offer case, `Offer.status = declined` distinguish which happened — see section 7b. It remains directly organization-writable through the generic status endpoint. A rejected application is not automatically re-openable — reversing one requires a manual data change, not an API action; this is a stated rule, not one enforced by the API.
+- `rejected` continues to mean the hiring process ended negatively — either the organization declined the candidate directly at any appropriate stage before an Offer exists (section 3, section 7), or the student declined a sent Offer (`Student\OfferController::decline()`, section 7b). Both converge on the same `Application.status = rejected`; only the actor and, for the Offer case, `Offer.status = declined` distinguish which happened — see section 7b. **It remains directly organization-writable through the generic status endpoint only up until an Offer exists for the application** — as of Phase 6C-4, once an Offer exists (`sent`, `accepted`, or `declined`), the generic endpoint is blocked entirely (`409`), even for `rejected`; see the Offer integrity rule below and section 7b. A rejected application is not automatically re-openable — reversing one requires a manual data change, not an API action; this is a stated rule, not one enforced by the API.
+- **Offer/Application integrity rule (Phase 6C-4): once an Offer exists for an application, `Application` and `Offer` lifecycle are synchronized and the generic `PUT /api/organization/applications/{application}/status` endpoint can no longer independently override that lifecycle — for any requested status, not `rejected` alone.** Without this, an organization could otherwise reject an application whose Offer is still `sent`, producing the impossible combination `Offer.status = sent` + `Application.status = rejected`. v1 has no Offer cancel/rescind workflow (section 7b), so this is an unconditional block, not a conditional one, enforced in `Organization\ApplicationController::updateStatus()` with a `409` (`"This application already has an offer; its status can only change through the offer accept/decline endpoints."`). The student's accept/decline response (section 7b) remains the only way an application with a `sent` Offer can move again.
 - A withdrawn application is controlled by the student; once `withdrawn`, no further status change is accepted from any source (`409`).
 - **`application.status` owns recruitment progress only** (Phase 4A-1 decision, reaffirmed by Phase 6B-0 and Phase 6C-0/6C-1). It does not, and must not, describe assessment-path/assessment-outcome detail (that belongs to `assessment.status`/`assessment.result`, see section 7) or Offer-specific detail (that belongs to `offer.status`, see section 7b) — it only ever tracks the overall stage the application itself is at.
 - **`in_assessment` (Phase 6B-0) is the generic application-level status meaning "an active evaluation exists for this application."** It is set exactly once, by `AssessmentService::transitionToInAssessment()`, whenever a real `Assessment` is created — for both `type=interview` and `type=quiz`, without introducing a second status per type. It can never be set directly through the generic `PUT /api/organization/applications/{application}/status` endpoint — it must always be the byproduct of a real Assessment-creation workflow (see section 7 and docs/API.md section 5).
@@ -189,6 +190,18 @@ multi-model transition" doctrine `AssessmentService` already established.
 - **No update/delete/cancel/resend action exists for an Offer in v1** — once
   sent, its terms are immutable, and its only two possible futures are
   accepted or declined.
+- **(Phase 6C-4) Once an Offer exists, the organization's generic
+  `PUT /api/organization/applications/{application}/status` endpoint can no
+  longer move the Application at all** — including to `rejected`, which is
+  otherwise a valid request to that endpoint (section 5). This is the
+  direct consequence of v1 having no Offer cancel/rescind action: allowing
+  a generic reject to succeed after an Offer was sent would let
+  `Offer.status = sent` and `Application.status = rejected` coexist, an
+  impossible combination the row-locked accept/decline transaction above
+  already goes to considerable lengths to prevent from the student side.
+  The organization's only remaining lever once an Offer exists is to wait
+  for the student's response — see section 5's Offer/Application integrity
+  rule.
 
 ## 8. Notification Rules
 

@@ -55,13 +55,64 @@ class OrganizationDashboardTest extends TestCase
             'total_applications',
             'pending_applications',
             'shortlisted_applications',
+            'offer_sent_applications',
             'accepted_applications',
             'rejected_applications',
             'total_interviews',
             'completed_interviews',
         ]]);
-        // Fixing the interview query must never grow the response shape.
-        $this->assertArrayNotHasKey('offer_sent_applications', $response->json('data'));
+    }
+
+    /**
+     * Phase 6C-4: makes the final Offer funnel visible alongside the
+     * existing accepted/rejected terminal counts (see
+     * docs/BUSINESS_RULES.md section 5). `offer_sent_applications` counts
+     * `status = offer_sent` rows the same way every other status count
+     * here is a plain per-status count -- no Offer table join needed since
+     * `Application.status` already carries this signal (see
+     * `OfferService::sendOffer()`).
+     */
+    public function test_offer_sent_applications_count_is_correct_and_isolated_by_ownership(): void
+    {
+        $orgA = $this->approvedOrganization();
+        $opportunityA = $this->opportunityFor($orgA);
+        $this->applicationFor($opportunityA, 'offer_sent');
+        $this->applicationFor($opportunityA, 'offer_sent');
+        $this->applicationFor($opportunityA, 'in_assessment');
+
+        $orgB = $this->approvedOrganization();
+        $opportunityB = $this->opportunityFor($orgB);
+        $this->applicationFor($opportunityB, 'offer_sent');
+
+        Sanctum::actingAs($orgA->user);
+        $responseA = $this->getJson('/api/organization/dashboard');
+        $responseA->assertJsonPath('data.offer_sent_applications', 2);
+
+        Sanctum::actingAs($orgB->user);
+        $responseB = $this->getJson('/api/organization/dashboard');
+        $responseB->assertJsonPath('data.offer_sent_applications', 1);
+    }
+
+    /**
+     * Adding `offer_sent_applications` must never change what
+     * `accepted_applications`/`rejected_applications` count -- each remains
+     * a plain per-status count, unaffected by the new field alongside it.
+     */
+    public function test_accepted_and_rejected_counts_are_unchanged_by_the_new_field(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $this->applicationFor($opportunity, 'accepted');
+        $this->applicationFor($opportunity, 'rejected');
+        $this->applicationFor($opportunity, 'offer_sent');
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->getJson('/api/organization/dashboard');
+
+        $response->assertJsonPath('data.accepted_applications', 1)
+            ->assertJsonPath('data.rejected_applications', 1)
+            ->assertJsonPath('data.offer_sent_applications', 1);
     }
 
     public function test_interview_count_is_correct(): void

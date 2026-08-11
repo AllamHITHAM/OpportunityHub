@@ -627,6 +627,60 @@ Offers.
 
 ---
 
+## Final Decision Cleanup & Regression Pass (Phase 6C-4)
+
+Closes out the recruitment-flow work started at Phase 6B-0: adds the
+final-funnel dashboard count deferred since then, and closes the one real
+integrity gap the Offer feature (Phase 6C-1) left open — a generic
+Application-status write that could still contradict an existing Offer.
+No new recruitment states, no Offer expiry/cancellation/resend, no
+Notifications/SMTP/AI ranking — all deliberately out of scope (see
+docs/BUSINESS_RULES.md).
+
+- **`offer_sent_applications` added to both dashboards** (the field
+  deferred since the post-6C-1 Dashboard Interview Query Fix above) —
+  `Organization\DashboardController`/`Student\DashboardController` each
+  gained one additional `(clone $applications)->where('status',
+  'offer_sent')->count()`, ownership-scoped exactly like every other count
+  already there. Purely additive: `accepted_applications`/
+  `rejected_applications` and every other existing field are unchanged,
+  proven by dedicated test coverage in `OrganizationDashboardTest`/
+  `StudentDashboardTest`.
+- **Offer/Application integrity gap closed.**
+  `Organization\ApplicationController::updateStatus()` now checks
+  `$application->offer()->exists()` before applying any generic status
+  change and returns `409` if one is found — regardless of the Offer's own
+  `status` (`sent`/`accepted`/`declined`) and regardless of which status
+  value was requested (including `rejected`, otherwise still valid input).
+  Before this fix, an organization could call the generic endpoint with
+  `status=rejected` on an application whose Offer was still `sent`,
+  producing `Offer.status=sent` + `Application.status=rejected` — a
+  combination the row-locked `OfferService::respondToOffer()` transaction
+  already prevents from the student side, but which this endpoint had no
+  equivalent guard against. See docs/BUSINESS_RULES.md section 5/7b and
+  `tests/Feature/Offers/OfferApplicationIntegrityTest.php`.
+- **No Offer cancel/rescind workflow was added to work around this** — the
+  fix is a hard block, matching v1's existing "no rescind" design (section
+  7b); an organization's only lever once an Offer exists is to wait for
+  the student's response.
+- **Flutter**: `OrganizationApplicationDetailsScreen`'s Reject button had
+  the same latent gap on the client side — it was shown for any
+  `in_assessment` application regardless of whether an Offer already
+  existed for it (only `Send Offer` had the `!hasOffer` guard). Fixed by
+  applying the same `!hasOffer` condition to `Reject`, so the button
+  disappears the moment the real Offer data says one exists, even before
+  `application.status` itself catches up to `offer_sent` — consistent
+  with this screen's existing "actual Offer data wins over stale
+  Application status" rule (see `_OfferSection`'s own doc comment).
+- **No Student/Organization dashboard screen exists in Flutter yet** — only
+  Admin's dashboard is wired up (`lib/providers/admin_dashboard_provider.dart`
+  et al.). `offer_sent_applications` is therefore a backend-only addition
+  this phase; there is no dashboard model/screen to extend on the Flutter
+  side, and building one from scratch was out of this phase's cleanup-only
+  scope.
+
+---
+
 ## Authentication
 
 Authentication will use Laravel Sanctum.
