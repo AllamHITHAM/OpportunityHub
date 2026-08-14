@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Controllers\Student\Concerns\HidesInternalApplicationFields;
 use App\Http\Requests\Student\ApplyToOpportunityRequest;
 use App\Models\Opportunity;
+use App\Services\MatchingService;
 use App\Services\NotificationService;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
@@ -17,8 +18,10 @@ class ApplicationController extends Controller
 {
     use HidesInternalApplicationFields;
 
-    public function __construct(private readonly NotificationService $notifications)
-    {
+    public function __construct(
+        private readonly NotificationService $notifications,
+        private readonly MatchingService $matching,
+    ) {
     }
 
     public function store(ApplyToOpportunityRequest $request, Opportunity $opportunity): JsonResponse
@@ -75,6 +78,14 @@ class ApplicationController extends Controller
                     ...$request->validated(),
                     'opportunity_id' => $opportunity->id,
                 ]);
+
+                // Phase 8A-2: synchronous, deterministic, no external I/O --
+                // safe to run inline before the transaction commits. Never
+                // exposed to the student (see HidesInternalApplicationFields
+                // below).
+                $result = $this->matching->analyze($created);
+                $created->match_score = $result['overall_match_score'];
+                $created->save();
 
                 $this->notifications->notifyApplicationSubmitted(
                     $opportunity->organizationProfile->user,

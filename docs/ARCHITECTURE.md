@@ -1170,6 +1170,97 @@ calculation, no migration, no Flutter change.
 
 ---
 
+## MatchingService v1.1 & Automatic Match Calculation (Phase 8A-2)
+
+Rewrites `App\Services\MatchingService`'s formula and wires it into
+application creation. Deliberately deterministic and synchronous
+throughout: no AI/LLM API, no CV parsing, no migration/backfill, no
+queue/job, no new endpoint, no Flutter change.
+
+- **New base weights: Skills 60% / Field-Major 20% / Experience 20%.**
+  Replaces the old Skills 62.5% / Experience 25% / Education 12.5%
+  formula. The fixed `50.0` "education" placeholder (there being no
+  structured education field on `student_profiles`) is removed entirely,
+  not just hidden — the response no longer has an `education_match_score`
+  key at all, replaced by `field_match_score`.
+- **Proportional weight redistribution for unavailable factors.** A
+  factor is included in the weighted average only when its required input
+  genuinely exists; `MatchingService::weightedAverage()` sums
+  `score * weight` and `weight` only over non-null components and divides
+  one by the other — algebraically identical to "redistribute the missing
+  factor's weight proportionally across the rest." If every factor is
+  unavailable, the total weight is `0` and the method returns a real,
+  calculated `0.00` rather than `null` or throwing — this preserves
+  `analyze()`'s existing contract of always returning a persistable float
+  (`ApplicationAnalysisController::analyze()` unconditionally does
+  `$application->match_score = $result['overall_match_score']`). In
+  practice this all-unavailable case is not reachable through normal data
+  today, since `experience_level` is a required column (see below).
+- **Skills (60%)** keeps its exact pre-8A-2 mechanics (required skills
+  count double, preferred count once, `matched_weight / total_weight *
+  100`) with one deliberate behavior change: an opportunity with zero
+  required/preferred skills defined now makes skills *unavailable*
+  (weight redistributes) instead of the old fake "100, trivially
+  satisfied" default for an empty requirement list.
+- **Field/Major (20%, new)** compares `studentProfile.major` against
+  `opportunity.field_of_study` after normalizing both (trim, collapse
+  internal whitespace, lowercase). Scores 100 on an exact match or when
+  one value contains the other as a whole word-boundary-anchored segment
+  (`(^|\s)needle(\s|$)` against the haystack) — e.g. "Civil Engineering"
+  matches inside "Civil Engineering and Construction" — otherwise 0. The
+  boundary anchor is deliberate: a naive substring check would let "Art"
+  falsely match inside "Part-time Arts Program". This is intentionally
+  not fuzzy/Levenshtein/NLP matching. If either `major` or
+  `field_of_study` is null/blank, the factor is unavailable (not a zero).
+- **Experience (20%)** keeps its exact pre-8A-2 mechanics (max
+  `years_of_experience` across the student's skills vs. the opportunity's
+  `experience_level` year threshold, capped at 100; `no_experience`
+  correctly always scores 100, a real answer not a placeholder). A
+  defensive "unavailable" branch was added for a missing/unrecognized
+  `experience_level`, but `experience_level` is a required, non-nullable
+  enum column on `Opportunity`, so this branch is not reachable through
+  normal opportunity creation today — kept only so a future schema
+  relaxation or a malformed row degrades safely instead of silently
+  scoring against an assumed 0-year requirement.
+- **Automatic calculation on application creation.**
+  `Student\ApplicationController::store()` now also constructor-injects
+  `MatchingService`. Inside the existing `DB::transaction()`: create
+  `Application` → calculate `MatchingService::analyze()` and persist
+  `match_score` → create the "New Application" `Notification` → commit.
+  Synchronous, no external I/O, no queue — safe to run inline before
+  commit exactly like the Phase 7A-2 Notification insert it now precedes.
+  `HidesInternalApplicationFields` (Phase 8A-1) already strips
+  `match_score` from the response regardless of whether the value is
+  `null` or a freshly-calculated number, so no privacy-mechanism change
+  was needed for this phase.
+- **`POST .../analyze` remains the single implementation of manual
+  recalculation** — unchanged, still calls the same
+  `MatchingService::analyze()`, so the auto-calc path and the manual path
+  can never drift into two different formulas.
+- **No backfill.** Applications created before this phase keep
+  `match_score: null` until an organization explicitly calls `analyze`;
+  only newly-created applications get an automatic score.
+- **Tested via an extended `tests/Feature/AI/MatchingBehaviorTest.php`**
+  (formula scenarios: perfect/zero match, missing-major and
+  missing-field-of-study redistribution with exact weighted-average
+  arithmetic, case/whitespace-normalized field matching, the
+  word-boundary contains-match and its false-positive guard, the
+  no-opportunity-skills-is-unavailable fix, `no_experience` always
+  scoring 100, proportional experience scoring, required-vs-preferred
+  skill weighting, and confirmation `education_match_score` no longer
+  appears in the response) and a new
+  `tests/Feature/Applications/ApplicationAutoMatchingTest.php` (apply
+  auto-calculates and persists a score, the auto-calculated score matches
+  what a manual `analyze` call would produce for identical data, a sparse
+  profile/opportunity still gets a real non-null score instead of
+  crashing, the create response still never exposes `match_score`, the
+  "New Application" notification still fires alongside auto-matching, and
+  a rolled-back duplicate-apply leaves no stray calculation). All
+  pre-existing `Applications`/`AI`/`ApplicationPrivacyTest`/
+  `ApplicationRankingTest` tests pass unmodified.
+
+---
+
 ## Development Flow
 
 Database

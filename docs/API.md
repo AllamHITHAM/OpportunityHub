@@ -571,19 +571,21 @@ of v1.
 
 ## 8. AI Matching
 
-Both endpoints run the same rule-based `MatchingService` (skills compared against opportunity requirements, a rough experience heuristic, and a fixed neutral placeholder for education, weighted 62.5/25/12.5). **Not** triggered automatically on application submission — both are explicit, organization-triggered, on-demand calls.
+Both endpoints run the same rule-based `MatchingService` v1.1 (Phase 8A-2): skills compared against opportunity requirements (60%), student major vs. opportunity field of study (20%), and an experience heuristic (20%). No education/location/work-mode factor exists in v1, and no factor is ever given a fake placeholder value — a factor that can't be genuinely scored (e.g. no major recorded, or the opportunity has no skills listed) is excluded and its weight is redistributed proportionally across the remaining scoreable factors, so `overall_match_score` always normalizes to 0–100.
 
-**`match_score` is organization-internal** — see section 5's "Organization applicant ranking" and "Student-visible Application fields" notes (Phase 8A-1) for exactly where it's used to rank applicants and exactly which Student-facing responses omit it.
+**Auto-calculated on application submission (Phase 8A-2):** `POST /api/opportunities/{opportunity}/apply` now calculates and persists `match_score` synchronously, inside the same transaction as the Application insert — no queue, no external call, no extra request needed. `POST .../analyze` below remains the explicit manual **recalculation** endpoint (same formula, no duplicate implementation) — useful after the student's profile/skills or the opportunity's requirements change. Applications created before Phase 8A-2 are not backfilled and keep `match_score: null` until an organization explicitly calls `analyze`.
+
+**`match_score` is organization-internal** — see section 5's "Organization applicant ranking" and "Student-visible Application fields" notes (Phase 8A-1) for exactly where it's used to rank applicants and exactly which Student-facing responses omit it. This still holds for auto-calculated scores.
 
 ### POST /api/organization/applications/{application}/analyze
 - Middleware: `auth:sanctum, active, role:organization`
-- Success: 200 — `{"data": {"overall_match_score": n, "skills_match_score": n, "education_match_score": n, "experience_match_score": n, "strengths": [...], "weaknesses": [...], "recommendation": "..."}}`. Persists `overall_match_score` into `applications.match_score`. Does not touch `status`, does not create `Interview`/`Notification` records.
+- Success: 200 — `{"data": {"overall_match_score": n, "skills_match_score": n|null, "field_match_score": n|null, "experience_match_score": n|null, "strengths": [...], "weaknesses": [...], "recommendation": "..."}}`. A per-factor score is `null` when that factor was unavailable (not scoreable), not a fake neutral value. Persists `overall_match_score` into `applications.match_score`. Does not touch `status`, does not create `Interview`/`Notification` records.
 - Errors: 401, 403, 404
 
 ### GET /api/organization/applications/{application}/analysis
 - Same middleware
-- Success: 200 — same shape, but `overall_match_score` is forced to the **stored** `applications.match_score` (not a fresh recomputation) so it never drifts from what `analyze` last saved. Purely read-only — writes nothing.
-- Errors: 401, 403, 404 (also returned if `analyze` was never called yet, i.e. `match_score` is `null`, message: "Application analysis not found")
+- Success: 200 — same shape, but `overall_match_score` is forced to the **stored** `applications.match_score` (not a fresh recomputation) so it never drifts from what `analyze` (or auto-calculation on apply) last saved. Purely read-only — writes nothing.
+- Errors: 401, 403, 404 (also returned if `match_score` is still `null` — never calculated, e.g. an application created before Phase 8A-2 that hasn't been recalculated — message: "Application analysis not found")
 
 ---
 
