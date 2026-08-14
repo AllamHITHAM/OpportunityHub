@@ -23,7 +23,9 @@ class ApplicationController extends Controller
 
         $applications = Application::whereHas('opportunity', function ($query) use ($organizationId) {
             $query->where('organization_id', $organizationId);
-        })->with(['opportunity', 'studentProfile.user', 'cv'])->get();
+        })->with(['opportunity', 'studentProfile.user', 'cv'])
+            ->orderByRaw($this->matchScoreRankingOrder())
+            ->get();
 
         return response()->json([
             'success' => true,
@@ -42,13 +44,34 @@ class ApplicationController extends Controller
             ], 404);
         }
 
-        $applications = $opportunity->applications()->with(['studentProfile.user', 'cv'])->get();
+        $applications = $opportunity->applications()->with(['studentProfile.user', 'cv'])
+            ->orderByRaw($this->matchScoreRankingOrder())
+            ->get();
 
         return response()->json([
             'success' => true,
             'message' => 'Applications retrieved successfully',
             'data' => $applications,
         ]);
+    }
+
+    /**
+     * Ranking for organization-facing applicant lists (Phase 8A-1):
+     * calculated scores first (highest first), null (not-yet-calculated)
+     * scores always last, `applied_at` ascending as the deterministic
+     * tie-breaker within each group (earliest applicant first). Never
+     * applied to any student-facing endpoint or ordering.
+     *
+     * `match_score IS NULL` evaluates to `0`/`1` identically on both this
+     * project's runtime driver (MySQL/MariaDB) and its test driver
+     * (SQLite) -- ordering ascending on that expression puts every
+     * non-null row (`0`) before every null row (`1`) on both, without
+     * relying on driver-specific `NULLS LAST` syntax this project doesn't
+     * universally support.
+     */
+    private function matchScoreRankingOrder(): string
+    {
+        return 'match_score IS NULL ASC, match_score DESC, applied_at ASC';
     }
 
     public function show(Application $application, Request $request): JsonResponse

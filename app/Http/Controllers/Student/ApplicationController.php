@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Student;
 
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Student\Concerns\HidesInternalApplicationFields;
 use App\Http\Requests\Student\ApplyToOpportunityRequest;
 use App\Models\Opportunity;
 use App\Services\NotificationService;
@@ -14,6 +15,8 @@ use Illuminate\Support\Facades\DB;
 
 class ApplicationController extends Controller
 {
+    use HidesInternalApplicationFields;
+
     public function __construct(private readonly NotificationService $notifications)
     {
     }
@@ -89,16 +92,20 @@ class ApplicationController extends Controller
             ], 409);
         }
 
+        $application->load(['opportunity', 'cv']);
+        $this->hideInternalApplicationFields($application);
+
         return response()->json([
             'success' => true,
             'message' => 'Application submitted successfully',
-            'data' => $application->load(['opportunity', 'cv']),
+            'data' => $application,
         ], 201);
     }
 
     public function index(Request $request): JsonResponse
     {
         $applications = $request->user()->studentProfile->applications()->with(['opportunity', 'cv'])->get();
+        $applications->each(fn ($application) => $this->hideInternalApplicationFields($application));
 
         return response()->json([
             'success' => true,

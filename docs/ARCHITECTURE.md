@@ -1111,6 +1111,65 @@ provider is configured, no live email is ever sent.
 
 ---
 
+## Match Score Privacy & Applicant Ranking (Phase 8A-1)
+
+Fixes a confirmed privacy leak (`Application.match_score` — an
+organization-internal output of `App\Services\MatchingService` — was
+reachable by the student it belongs to through several Student-facing
+responses) and adds deterministic organization-side applicant ranking
+using the already-stored `match_score` column. Deliberately scoped
+narrowly: no `MatchingService` formula/weight change, no automatic score
+calculation, no migration, no Flutter change.
+
+- **Privacy mechanism: per-instance `makeHidden()`, not model-level
+  `$hidden`** — `App\Http\Controllers\Student\Concerns\HidesInternalApplicationFields`,
+  the `Application` counterpart to the pre-existing
+  `HidesInternalInterviewFields`/`HidesInternalQuestionFields` (Phase
+  4A-1/6B-3). `Application` deliberately gains no `$hidden` of its own: doing
+  so globally would also hide `match_score` from the Organization endpoints
+  that generate and rely on it, so the fix is applied only from the Student
+  side, at exactly the response paths that serialize an `Application`:
+  `Student\ApplicationController::store()`/`index()` (direct), and the
+  nested `application` on `Student\InterviewController::index()`
+  (`assessment.application`, which is also the same object
+  `Interview::application()`'s backward-compat accessor resolves to — one
+  `makeHidden()` call covers both keys) and
+  `Student\AssessmentController::index()`/`show()`. `Student\QuizController`
+  and `Student\OfferController` were inspected and confirmed to never
+  serialize a nested `Application` at all (only used internally for
+  ownership checks), so neither needed a change.
+- **Organization visibility is untouched by construction** — because the
+  fix never touches `Organization\ApplicationController`,
+  `ApplicationAnalysisController`, or the `Application` model itself, there
+  was no risk of "accidentally hiding `match_score` from the Organization
+  side" to guard against; that endpoint code is simply unmodified.
+- **Ranking**: `Organization\ApplicationController::index()` and
+  `indexForOpportunity()` add
+  `->orderByRaw('match_score IS NULL ASC, match_score DESC, applied_at ASC')`.
+  `match_score IS NULL` evaluates to a plain `0`/`1` identically on this
+  project's MySQL/MariaDB runtime and its SQLite test driver, so ordering
+  ascending on it reliably sorts every non-null score before every null one
+  on both without relying on driver-specific `NULLS LAST` syntax. Applied
+  only to the two list endpoints — `show()`, `updateStatus()`, and every
+  Student-facing endpoint are unchanged. Ranking only ever reads the
+  already-stored column; it never calls `MatchingService` and never
+  mutates an `Application`.
+- **No migration.** `applications.match_score` was already the correct
+  nullable `decimal(5,2)` — this phase is pure application-code, zero
+  schema change, zero backfill.
+- **Tested via two new files** —
+  `tests/Feature/Applications/ApplicationPrivacyTest.php` (every direct and
+  nested Student-facing leak path, including a non-null and a `0.00` score
+  to prove this is field-level privacy, not null-omission) and
+  `tests/Feature/Applications/ApplicationRankingTest.php` (the exact
+  92/75/75/10/0/null/null scenario with out-of-insertion-order
+  `applied_at` timestamps on both endpoints, ownership scoping, "listing
+  never calculates a score", Student ordering unaffected, and Organization
+  visibility of null/zero/numeric scores preserved). All pre-existing
+  `Applications`/`AI` tests pass unmodified.
+
+---
+
 ## Development Flow
 
 Database

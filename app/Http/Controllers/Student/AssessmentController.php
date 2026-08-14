@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Student;
 
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Student\Concerns\HidesInternalApplicationFields;
 use App\Http\Controllers\Student\Concerns\HidesInternalInterviewFields;
 use App\Http\Controllers\Student\Concerns\HidesInternalQuestionFields;
 use App\Models\Assessment;
@@ -11,6 +12,7 @@ use Illuminate\Http\Request;
 
 class AssessmentController extends Controller
 {
+    use HidesInternalApplicationFields;
     use HidesInternalInterviewFields;
     use HidesInternalQuestionFields;
 
@@ -39,6 +41,7 @@ class AssessmentController extends Controller
         $assessments->each(function (Assessment $assessment) {
             $this->hideInternalInterviewFields($assessment->interview);
             $this->hideInternalQuestionFields($assessment->quiz);
+            $this->hideInternalApplicationFields($assessment->application);
         });
 
         return response()->json([
@@ -63,6 +66,7 @@ class AssessmentController extends Controller
         $assessment->load(['application.opportunity', 'application.cv', 'interview', 'quiz.questions']);
         $this->hideInternalInterviewFields($assessment->interview);
         $this->hideInternalQuestionFields($assessment->quiz);
+        $this->hideInternalApplicationFields($assessment->application);
 
         return response()->json([
             'success' => true,

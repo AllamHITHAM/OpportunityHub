@@ -235,12 +235,12 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 ### GET /api/organization/applications
 - Middleware: `auth:sanctum, active, role:organization`
-- Success: 200 — every application across all of this organization's opportunities
+- Success: 200 — every application across all of this organization's opportunities, **ranked by `match_score` descending (Phase 8A-1)** — see the ranking note below
 - Errors: 401, 403
 
 ### GET /api/organization/opportunities/{opportunity}/applications
 - Same middleware
-- Success: 200
+- Success: 200 — same ranking as above, scoped to this one opportunity's applicants
 - Errors: 401, 403, 404 (opportunity not yours)
 
 ### GET /api/organization/applications/{application}
@@ -254,6 +254,10 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 - **As of Phase 6C-4, this endpoint is blocked entirely (409) once the application already has an Offer** — regardless of the Offer's own status (`sent`/`accepted`/`declined`) and regardless of which value the request body asks for (including `reviewed`/`shortlisted`/`rejected`, which are otherwise valid input). Once an Offer exists, only `OfferService` (via the Offer accept/decline endpoints) may move the Application again — see docs/BUSINESS_RULES.md section 7b.
 - Success: 200 — also sets `reviewed_at = now()` on every successful call, even if re-setting the same status.
 - Errors: 401, 403, 404, 409 ("Cannot change the status of a withdrawn application", or "This application already has an offer; its status can only change through the offer accept/decline endpoints." — Phase 6C-4), 422
+
+**Organization applicant ranking (Phase 8A-1):** both list endpoints above order results by `match_score` descending, applications with no score yet (`null`) always sorted after every calculated score regardless of value (including `0`), and `applied_at` ascending as the deterministic tie-breaker within a group of equal (or equally-null) scores. Uses only the already-stored `match_score` column — never calls `MatchingService`, never calculates or mutates a score as a side effect of listing. `GET /organization/applications/{application}` (single-item) and the Student endpoints are unaffected — this ordering applies to the two list endpoints only.
+
+**Student-visible Application fields (Phase 8A-1):** `match_score` — an organization-internal matching/ranking aid (see section 8) — is omitted from every Student-facing response that returns an `Application`, directly or nested: `GET /api/student/applications`, the `POST /api/opportunities/{opportunity}/apply` success response, and the nested `application` on `GET /api/student/interviews`, `GET /api/student/assessments`, and `GET /api/student/assessments/{assessment}`. Applied per-response via `App\Http\Controllers\Student\Concerns\HidesInternalApplicationFields`, not a model-level `$hidden` — the same convention `HidesInternalInterviewFields`/`HidesInternalQuestionFields` already established for the identical class of problem. The Organization-facing endpoints above are unaffected and continue to return `match_score` exactly as before (`null` = not yet calculated, `0`–`100` = calculated).
 
 ---
 
@@ -568,6 +572,8 @@ of v1.
 ## 8. AI Matching
 
 Both endpoints run the same rule-based `MatchingService` (skills compared against opportunity requirements, a rough experience heuristic, and a fixed neutral placeholder for education, weighted 62.5/25/12.5). **Not** triggered automatically on application submission — both are explicit, organization-triggered, on-demand calls.
+
+**`match_score` is organization-internal** — see section 5's "Organization applicant ranking" and "Student-visible Application fields" notes (Phase 8A-1) for exactly where it's used to rank applicants and exactly which Student-facing responses omit it.
 
 ### POST /api/organization/applications/{application}/analyze
 - Middleware: `auth:sanctum, active, role:organization`

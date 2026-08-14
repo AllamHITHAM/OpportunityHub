@@ -242,6 +242,8 @@ multi-model transition" doctrine `AssessmentService` already established.
   - Work mode: 10%
 - The system should store the final score in applications.match_score.
 - The first version should use rule-based matching before external AI APIs.
+- **`match_score` is organization-internal and must never be exposed to the student it belongs to (Phase 8A-1).** A student has no product reason to see how they were scored, and exposing it would also leak whether/how they were ranked against other applicants. Enforced per-response on every Student-facing endpoint that returns an `Application` (directly or nested under Interview/Assessment) via `App\Http\Controllers\Student\Concerns\HidesInternalApplicationFields` — see docs/API.md section 5. This is a field-level rule, not a null-only omission: an application with a real calculated score (including `0`, a legitimate low score) must be hidden exactly the same as one that hasn't been scored yet.
+- **Organization applicant lists are ranked by `match_score` (Phase 8A-1).** `GET /organization/applications` and `GET /organization/opportunities/{opportunity}/applications` order applicants by `match_score` descending, with not-yet-calculated (`null`) scores always last regardless of any calculated value, and `applied_at` ascending as the tie-breaker. Ranking only ever reads the already-stored score — it never triggers a calculation, and it never reorders any Student-facing list.
 
 ## 10. Security Rules
 
