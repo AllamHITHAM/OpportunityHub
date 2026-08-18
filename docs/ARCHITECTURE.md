@@ -1261,6 +1261,105 @@ queue/job, no new endpoint, no Flutter change.
 
 ---
 
+## Real CV Upload Foundation (Phase 8A-4)
+
+Replaces the CV feature's placeholder "client types a `file_path` string"
+behavior with a genuine multipart PDF upload, private managed storage, and
+authenticated ownership-checked download endpoints. Deliberately scoped
+narrowly: no CV parsing, no AI skill extraction, no `MatchingService`
+change, no migration.
+
+- **No migration.** `cvs.file_path` (a plain `string` column) was already
+  sufficient to hold a server-generated relative storage path like
+  `cvs/3/1f9c2b1a-....pdf` — well under its 255-char default length — so
+  this phase is pure application-code. No `original_filename` (or any
+  other) column was added: the client's original filename is never even
+  read past validation, so there was nothing worth preserving that the
+  existing schema didn't already support.
+- **Upload contract**: `POST /api/student/cvs` request body changed from
+  JSON (`title`, `file_path`) to `multipart/form-data` (`title`, `file`).
+  `App\Http\Requests\Student\StoreCVRequest` now validates `file` as
+  `['required', 'file', 'mimes:pdf', 'max:5120']` — `mimes:pdf` inspects
+  the file's real content/magic bytes, not just its extension or
+  client-reported MIME type. A `file_path` field in the request body is
+  simply not a validated/accepted input any more — nothing reads it, so it
+  can never influence where or under what name a file is stored.
+- **Storage**: the `local` disk (`storage/app/private`, `serve => true`,
+  see config/filesystems.php — already the project's pre-existing default,
+  untouched by this phase) under `cvs/{student_profile_id}/{uuid}.pdf`.
+  `Str::uuid()` generates the filename — the client's original filename
+  (even something like `../../../evil.pdf`) is never used to construct a
+  path or filename at all, so there is no path-traversal surface: nothing
+  about the request influences the stored path except the authenticated
+  student's own `student_profile.id` (never client-supplied) and a
+  server-generated random name.
+- **Backward compatibility, no destructive migration.** Rows created
+  before this phase may still hold whatever string a student typed into
+  the old `file_path` text field (e.g. a local Windows path). These rows
+  are left exactly as they are — never migrated, never deleted. They
+  continue to list normally; the download endpoints below simply treat
+  them as "file not found" (a controlled 404, via `Storage::exists()`
+  returning false for a string that was never really stored on this disk)
+  rather than special-casing or crashing on them, and delete-time file
+  cleanup structurally never touches them either (see below).
+- **Secure download, two endpoints, both inline `application/pdf`
+  responses via `Storage::disk('local')->response()`:**
+  - `GET /api/student/cvs/{cv}/download` (`App\Http\Controllers\Student\
+    CVController::download()`) — the CV's own owning student only (404
+    otherwise), mirroring the ownership check every other Student CV
+    action already uses.
+  - `GET /api/organization/applications/{application}/cv`
+    (`App\Http\Controllers\Organization\ApplicationController::
+    downloadCv()`) — only reachable through an `Application` the
+    requesting organization's own `Opportunity` actually owns (the same
+    `opportunity->organization_id` check every other organization
+    Application action uses); there is no `GET /organization/cvs/{cv}`
+    route, so a CV can never be reached by guessing its ID directly, only
+    through an application the organization genuinely owns. A missing
+    physical file (managed or legacy) returns the same controlled 404 as
+    the student endpoint.
+  - Neither endpoint accepts or exposes a public/static URL — a file is
+    only ever served by streaming it through one of these two
+    authenticated, ownership-checked actions.
+- **Delete-time file cleanup is conservative by construction.**
+  `CVController::destroy()` deletes the physical file only when
+  `file_path` starts with `cvs/{owning student_profile_id}/` — the exact
+  prefix this application itself always generates for that CV's owner.
+  Since `file_path` is a trusted, already-validated DB column (never a
+  per-request client value at delete time), this is a safe, sufficient
+  check: a legacy fake path never matches this prefix and is simply left
+  alone, so `Storage::delete()` is never called against an arbitrary,
+  client-influenced path. The existing delete-conflict rule (409 when the
+  CV is used by an Application) is completely unchanged and still leaves
+  both the DB row and any physical file untouched.
+- **CV response shape is unchanged.** `file_path` is still returned as
+  part of the CV JSON (kept for compatibility, per docs/API.md section 4)
+  — for new uploads it's now always a safe server-managed relative path,
+  never a client-chosen or absolute-filesystem string; the real security
+  boundary is the two ownership-checked download endpoints above, not
+  hiding the column. The Flutter app (Phase 8A-4 Flutter side) no longer
+  displays this raw value to either a student or an organization — see the
+  Flutter changes below.
+- **Application/CV relationship is completely unchanged.** Applying still
+  submits `cv_id` only (`Student\ApplicationController::store()`, via
+  `ApplyToOpportunityRequest`'s existing `cv_id` ownership-scoped
+  `Rule::exists()`); the CV itself is never re-uploaded or re-validated at
+  apply time, exactly as before this phase.
+- **Tested via `tests/Feature/Student/StudentCvUploadTest.php`** (new —
+  valid upload, physical storage, managed-path shape, title persistence,
+  auth/role/profile-existence gating, non-PDF rejection, over-5MB
+  rejection, an exact-5MB file accepted, missing-file rejection, a
+  client-supplied `file_path` being fully ignored, path-traversal-proof
+  filenames, both download endpoints' ownership/missing-file/legacy-path
+  behavior, and all three delete-cleanup scenarios) plus
+  `tests/Feature/Student/StudentCvTest.php`'s existing create test updated
+  for the new multipart contract — every other pre-existing CV/Application
+  test (list, set-default, delete-conflict, apply-with-cv_id) passes
+  unmodified, using `Storage::fake()`/`UploadedFile::fake()` throughout, no
+  real filesystem writes in tests.
+
+---
+
 ## Development Flow
 
 Database

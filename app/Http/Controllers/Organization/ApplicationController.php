@@ -10,6 +10,8 @@ use App\Services\NotificationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class ApplicationController extends Controller
 {
@@ -176,5 +178,36 @@ class ApplicationController extends Controller
             'message' => 'Application status updated successfully',
             'data' => $application->fresh(['opportunity', 'studentProfile.user', 'cv']),
         ]);
+    }
+
+    /**
+     * Phase 8A-4: streams the CV attached to [application]'s own submission
+     * back to the organization that owns the opportunity it was submitted
+     * to -- the only path an organization can ever reach a candidate's CV
+     * through (never by guessing a CV ID directly; there is no
+     * `GET /organization/cvs/{cv}` route). Serves inline, same as the
+     * student's own download endpoint -- "View CV" in the Flutter app.
+     */
+    public function downloadCv(Application $application, Request $request): JsonResponse|StreamedResponse
+    {
+        if ($application->opportunity->organization_id !== $request->user()->organizationProfile->id) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Application not found',
+                'data' => null,
+            ], 404);
+        }
+
+        $cv = $application->cv;
+
+        if ($cv === null || ! Storage::disk('local')->exists($cv->file_path)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'CV file not found',
+                'data' => null,
+            ], 404);
+        }
+
+        return Storage::disk('local')->response($cv->file_path, $cv->title.'.pdf');
     }
 }

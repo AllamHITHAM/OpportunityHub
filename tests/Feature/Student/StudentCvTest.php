@@ -8,6 +8,8 @@ use App\Models\OrganizationProfile;
 use App\Models\StudentProfile;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Storage;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
 
@@ -34,14 +36,18 @@ class StudentCvTest extends TestCase
 
     public function test_student_can_create_a_cv_record(): void
     {
+        // Phase 8A-4: CV creation is now a real multipart PDF upload, not a
+        // plain-string `file_path` field — see StudentCvUploadTest.php for
+        // the full upload/download/delete-cleanup coverage this phase adds.
+        Storage::fake('local');
         $student = $this->studentWithProfile();
 
         Sanctum::actingAs($student->user);
 
-        $response = $this->postJson('/api/student/cvs', [
+        $response = $this->post('/api/student/cvs', [
             'title' => 'Software Engineer CV',
-            'file_path' => 'cvs/software-engineer.pdf',
-        ]);
+            'file' => UploadedFile::fake()->create('resume.pdf', 100, 'application/pdf'),
+        ], ['Accept' => 'application/json']);
 
         $response->assertStatus(201)
             ->assertJsonPath('success', true)

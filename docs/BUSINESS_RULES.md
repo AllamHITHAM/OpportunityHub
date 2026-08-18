@@ -16,6 +16,8 @@
 - A student can add multiple skills.
 - A student cannot apply to the same opportunity more than once.
 - A student can view their own applications and interview details only.
+- **CV upload is a real multipart PDF upload (Phase 8A-4).** PDF only (`mimes:pdf`, checked against real file content, not just the extension), max 5 MB. The server generates a random filename for every upload — the client's original filename never determines where or under what name the file is stored, and a client can no longer supply an arbitrary `file_path` string at all. Files live in private storage (`storage/app/private/cvs/{student_id}/...`, the `local` disk), never the public web root — a CV file is only ever reachable through an authenticated, ownership-checked download endpoint (see docs/API.md section 4), never a direct/guessable URL. **CV parsing and AI skill extraction are explicitly NOT implemented in this phase** — the uploaded PDF's content is stored and served as-is, never read/parsed/analyzed server-side.
+- **Legacy CVs created before Phase 8A-4 may still have a non-managed `file_path`** (e.g. a plain string a student typed into the old text field, such as a local Windows path) — these rows are never migrated or deleted automatically; they simply behave as "file not found" (a controlled 404) if a download is attempted, and are left untouched by delete-time file cleanup (the backend only ever deletes a physical file it itself manages, under `cvs/{student_id}/...`).
 
 ## 3. Organization Rules
 

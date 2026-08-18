@@ -95,14 +95,19 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 ### POST /api/student/cvs
 - Same middleware
-- Body: `title` (required, max:255), `file_path` (required, max:2048 — plain string path, no real file upload yet)
-- Success: 201
-- Errors: 401, 403, 404, 422
+- **Phase 8A-4: real multipart PDF upload** — `multipart/form-data` body: `title` (required, max:255), `file` (required, an actual uploaded file — `mimes:pdf`, `max:5120` KB / 5 MB). The client no longer supplies `file_path` at all; the server generates a random UUID filename and stores the file itself under `storage/app/private/cvs/{student_id}/{uuid}.pdf` (the `local` disk, never the public web root — see docs/ARCHITECTURE.md). Any `file_path` field sent in the request is ignored — it is not a validated/accepted input.
+- Success: 201 — same response shape as before (`id`, `title`, `file_path`, `version`, `is_default`, `created_by_ai`, timestamps); `file_path` is now always a safe server-managed relative path, never a client-chosen string.
+- Errors: 401, 403, 404, 422 (missing/invalid `title`, missing `file`, non-PDF `file`, `file` over 5 MB)
+
+### GET /api/student/cvs/{cv}/download
+- Same middleware
+- **New in Phase 8A-4.** Streams the CV's own PDF back to the student it belongs to (`Content-Type: application/pdf`, served inline). This is the only way a CV file is ever actually reachable — there is no public/static URL for it.
+- Errors: 401, 403, 404 (not found / not yours, **or** the file no longer exists on disk — a legacy pre-8A-4 row with a fake string `file_path`, or a managed row whose physical file is missing, both return the same controlled 404 rather than a crash)
 
 ### DELETE /api/student/cvs/{cv}
 - Same middleware
-- Success: 200
-- Errors: 401, 403, 404 (not found / not yours), 409 ("Cannot delete a CV that has been used in an application")
+- Success: 200 — also deletes the physical file from disk, but **only** when `file_path` is a path this application itself generated (`cvs/{student_id}/...`); a legacy fake `file_path` (e.g. a local Windows path typed into the old text field, pre-8A-4) is left alone rather than attempting to delete an arbitrary, client-influenced path.
+- Errors: 401, 403, 404 (not found / not yours), 409 ("Cannot delete a CV that has been used in an application" — neither the DB row nor any physical file is touched on this conflict)
 
 ### PUT /api/student/cvs/{cv}/default
 - Same middleware
@@ -254,6 +259,11 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 - **As of Phase 6C-4, this endpoint is blocked entirely (409) once the application already has an Offer** — regardless of the Offer's own status (`sent`/`accepted`/`declined`) and regardless of which value the request body asks for (including `reviewed`/`shortlisted`/`rejected`, which are otherwise valid input). Once an Offer exists, only `OfferService` (via the Offer accept/decline endpoints) may move the Application again — see docs/BUSINESS_RULES.md section 7b.
 - Success: 200 — also sets `reviewed_at = now()` on every successful call, even if re-setting the same status.
 - Errors: 401, 403, 404, 409 ("Cannot change the status of a withdrawn application", or "This application already has an offer; its status can only change through the offer accept/decline endpoints." — Phase 6C-4), 422
+
+### GET /api/organization/applications/{application}/cv
+- Same middleware
+- **New in Phase 8A-4.** Streams the CV attached to this application back to the organization that owns the opportunity it was submitted to (`Content-Type: application/pdf`, served inline) — "View CV". This is the *only* path an organization can ever reach a candidate's CV through; there is no `GET /organization/cvs/{cv}` route, so a CV can never be reached by guessing its ID directly, only through an application the requesting organization actually owns.
+- Errors: 401, 403, 404 (application not owned/missing, **or** the CV file no longer exists on disk — both return the same controlled 404)
 
 **Organization applicant ranking (Phase 8A-1):** both list endpoints above order results by `match_score` descending, applications with no score yet (`null`) always sorted after every calculated score regardless of value (including `0`), and `applied_at` ascending as the deterministic tie-breaker within a group of equal (or equally-null) scores. Uses only the already-stored `match_score` column — never calls `MatchingService`, never calculates or mutates a score as a side effect of listing. `GET /organization/applications/{application}` (single-item) and the Student endpoints are unaffected — this ordering applies to the two list endpoints only.
 

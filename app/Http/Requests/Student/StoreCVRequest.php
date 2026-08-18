@@ -11,11 +11,17 @@ class StoreCVRequest extends FormRequest
         return true;
     }
 
+    /**
+     * Phase 8A-4: real multipart PDF upload replaces the old client-supplied
+     * `file_path` string -- a client can no longer choose where its "CV"
+     * points on the server, only supply the actual file. `mimes:pdf`
+     * inspects real file content, not just the extension.
+     */
     public function rules(): array
     {
         return [
             'title' => ['required', 'string', 'max:255'],
-            'file_path' => ['required', 'string', 'max:2048'],
+            'file' => ['required', 'file', 'mimes:pdf', 'max:5120'],
         ];
     }
 }

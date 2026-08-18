@@ -55,6 +55,7 @@ Route::middleware(['auth:sanctum', 'active', 'role:student'])->group(function ()
 Route::middleware(['auth:sanctum', 'active', 'role:student', 'profile.exists'])->group(function () {
     Route::get('/student/cvs', [CVController::class, 'index']);
     Route::post('/student/cvs', [CVController::class, 'store']);
+    Route::get('/student/cvs/{cv}/download', [CVController::class, 'download']);
     Route::delete('/student/cvs/{cv}', [CVController::class, 'destroy']);
     Route::put('/student/cvs/{cv}/default', [CVController::class, 'setDefault']);
 
@@ -99,6 +100,7 @@ Route::middleware(['auth:sanctum', 'active', 'role:organization'])->group(functi
     Route::get('/organization/opportunities/{opportunity}/applications', [OrganizationApplicationController::class, 'indexForOpportunity']);
     Route::get('/organization/applications/{application}', [OrganizationApplicationController::class, 'show']);
     Route::put('/organization/applications/{application}/status', [OrganizationApplicationController::class, 'updateStatus']);
+    Route::get('/organization/applications/{application}/cv', [OrganizationApplicationController::class, 'downloadCv']);
 
     Route::post('/organization/applications/{application}/interview', [OrganizationInterviewController::class, 'store']);
     Route::get('/organization/interviews', [OrganizationInterviewController::class, 'index']);
