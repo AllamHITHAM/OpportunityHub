@@ -1360,6 +1360,131 @@ change, no migration.
 
 ---
 
+## CV PDF Text Parsing Foundation (Phase 8A-5)
+
+Adds deterministic, server-side plain-text extraction for every newly
+uploaded CV PDF, so a future AI-matching phase has real CV content to work
+from. Deliberately scoped narrowly: no AI/LLM call of any kind, no skill
+extraction, no `MatchingService` change, no OCR, no DOCX support, no
+Flutter change.
+
+- **Parser: `smalot/pdfparser` v2.12.5** (Composer, LGPL-3.0, OSI
+  approved). Chosen because it's pure PHP — no external executable (no
+  `pdftotext` shell-out), no Python sidecar, no OCR — and requires only
+  `ext-iconv`/`ext-zlib` (already present) plus
+  `symfony/polyfill-mbstring`, both trivial, non-abandoned dependencies.
+  No PDF-parsing library was already present transitively before this
+  phase (`composer.lock` had none). The only other advisories `composer
+  audit` reports (several `league/commonmark` DoS advisories) are
+  pre-existing, required by `laravel/framework` itself, and entirely
+  unrelated to this addition.
+- **Schema: one nullable column, no other new tables/fields.**
+  `cvs.parsed_text` (`LONGTEXT NULL`, added via
+  `2026_08_18_090000_add_parsed_text_to_cvs_table`) — `LONGTEXT` because a
+  multi-page CV's extracted plain text can exceed `TEXT`'s 64KB limit in
+  principle, and there's no reason to risk truncation for what's already a
+  cheap column type in MySQL. Nullable so every pre-existing row (and
+  every new row whose PDF has no extractable text) stays valid with no
+  backfill. Deliberately **not** added: `extracted_skills`, `ai_summary`,
+  `parsed_at`, `parser_version`, `parsing_status`, embeddings, or any
+  other metadata — `parsed_text IS NULL` alone is a sufficient signal for
+  "not available yet" for everything this phase (or the AI phase after
+  it) needs to know; a future phase can add real metadata if it turns out
+  to genuinely need it.
+- **`App\Services\CvTextExtractor`** — the one place PDF parsing happens.
+  `extract(string $relativePath): string` takes a path on the `local`
+  disk (never a client-supplied path — see below), resolves it to an
+  absolute path via `Storage::disk('local')->path()`, and hands it to
+  `smalot/pdfparser`. Purely mechanical: no skill identification, no
+  summarization, no AI call, no model reads/writes — it returns a string
+  and nothing else. Normalization is minimal and non-destructive: CRLF/CR
+  unified to LF, runs of 3+ blank lines collapsed to one, outer whitespace
+  trimmed — deliberately no lowercasing and no punctuation stripping,
+  since a later AI-extraction phase needs text as close to the source as
+  possible. Returns an empty string (not an exception) when the PDF is
+  valid but has no extractable text (e.g. scanned/image-only, which this
+  phase does not OCR). Throws `App\Exceptions\CvTextExtractionException`
+  only for a genuine parse failure: the path isn't shaped like a managed
+  upload (`cvs/{student_id}/{uuid}.pdf` — defense in depth, since this
+  service is only ever called with a path this application itself just
+  generated, never client input), the file doesn't exist on disk, or the
+  PDF itself can't be opened at all (corrupt structure, or
+  encrypted/password-protected — `smalot/pdfparser` explicitly refuses
+  those with its own "Secured pdf file are currently not supported."
+  message, which this phase never exposes to an API response, only to the
+  Laravel log via `Log::warning()`).
+- **Synchronous, at the one real upload boundary, best-effort.**
+  `Student\CVController::store()` (Phase 8A-4's endpoint, unchanged route)
+  now: stores the file → calls `CvTextExtractor::extract()` → creates the
+  `CV` row with `parsed_text` set from the result. Chosen synchronous over
+  queued because extraction is bounded by the existing 5MB upload limit
+  and `smalot/pdfparser` has no external I/O to wait on — no new queue
+  infrastructure was worth introducing for that bound. Extraction is
+  wrapped so it **never blocks or fails the upload**: the file already
+  passed Laravel's own `mimes:pdf` validation before extraction runs, so
+  a parse failure at this point (image-only PDF, or a corrupt/encrypted
+  PDF that still identified as a PDF) is purely an internal processing
+  outcome, not a reason to reject an otherwise-valid upload — the hard
+  product requirement that a valid PDF upload must never produce a
+  broken/inconsistent CV record. Both "genuinely no text" and "extraction
+  failed" collapse to the same `parsed_text = null` outcome (see the
+  schema note above on why no separate status flag was needed to tell
+  them apart) — `CVController::extractParsedText()` is the one place that
+  decision is made.
+- **Orphan-file cleanup is narrow and precise.** The only failure mode
+  that can leave a stored-but-unreferenced file is the `CV` row's own
+  `create()` call failing *after* the file was already stored (e.g. a DB
+  error) — parsing failures never reach this path since they never block
+  row creation. `store()` wraps the `create()` call in a try/catch that
+  deletes the just-stored file and re-throws on any such failure. Legacy
+  files and files belonging to other CVs are never touched — the delete
+  only ever targets the exact path this same request just wrote.
+- **`parsed_text` is hidden at the model level** (`CV::$hidden =
+  ['parsed_text']`), not per-response like `HidesInternalApplicationFields`
+  hides `match_score` — there is no consumer of this API (Student or
+  Organization) that should ever see it, so there was no case to carve an
+  exception for. The CV response shape is otherwise completely unchanged
+  from Phase 8A-4; no new endpoint, no new response field.
+- **Delete is unmodified.** `parsed_text` disappears naturally with the
+  row when a CV is deleted — no separate parsed-text artifact/file exists
+  to clean up.
+- **No backfill.** Every CV row created before this phase — and any
+  legacy fake-path row — keeps `parsed_text = null` until (if ever) a
+  future phase adds an explicit re-parse action; none exists yet, per
+  this phase's own scope.
+- **Migration verified against the real local dev database, not only
+  SQLite tests.** A `mysqldump` backup of `opportunityhub_db` was taken
+  immediately before migrating (`storage/app/db-backups/`, already
+  covered by `storage/app/.gitignore`'s default `*` rule — never
+  committed). `php artisan migrate` ran cleanly, all 3 pre-existing `cvs`
+  rows were preserved with `parsed_text` correctly `null`, and a full
+  `migrate:rollback --step=1` + re-`migrate` round-trip confirmed the
+  migration is safe to reverse and re-apply without touching row count.
+- **Tested via `tests/Unit/Services/CvTextExtractorTest.php`** (new — hand-
+  built, byte-offset-correct minimal PDF fixtures covering simple text,
+  multiple lines, CRLF/blank-line normalization, WinAnsi-encoded accented
+  text, an image-only/no-text PDF, a malformed PDF, a truncated PDF, a
+  missing file, an encrypted PDF, and three "never read outside a managed
+  path" guards) and
+  `tests/Feature/Student/StudentCvParsingTest.php`** (new — a real text
+  PDF upload persists `parsed_text`, an image-only PDF and a
+  PDF-identified-but-unparseable upload both still succeed with
+  `parsed_text` null, `parsed_text` is absent from the create response,
+  the student CV list, an organization's single-application response, and
+  an organization's applicants list, a forced DB-insert failure via a
+  SQLite trigger leaves neither a CV row nor an orphaned file, and
+  default/delete/`cv_id`-apply behavior are all unaffected). Two
+  pre-existing migration-rollback test files
+  (`AssessmentMigrationTest.php`, `OfferSentStatusMigrationTest.php`) and
+  one more (`NotificationTypeMigrationTest.php`) needed their hardcoded
+  `--step` counts incremented by one, since each counts backward from
+  "however many migrations currently exist" to reach an earlier target
+  migration, and this phase's new migration now sits on top of all three
+  targets — a pre-existing, self-documented fragility (each file's own
+  doc comment already flagged it), not a behavior change.
+
+---
+
 ## Development Flow
 
 Database

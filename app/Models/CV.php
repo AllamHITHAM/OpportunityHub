@@ -17,10 +17,22 @@ class CV extends Model
         'student_id',
         'title',
         'file_path',
+        'parsed_text',
         'version',
         'is_default',
         'created_by_ai',
     ];
+
+    /**
+     * Phase 8A-5: `parsed_text` (the CV's raw extracted PDF text) is
+     * backend-only processing data for a future AI-matching phase, never
+     * something a Student or Organization needs from the API -- hidden at
+     * the model level (rather than per-response, like
+     * `HidesInternalApplicationFields` does for `match_score`) because
+     * there is no consumer of this API that should ever see it, so there's
+     * no case to carve an exception for.
+     */
+    protected $hidden = ['parsed_text'];
 
     public function studentProfile(): BelongsTo
     {

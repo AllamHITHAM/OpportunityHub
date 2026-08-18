@@ -2,15 +2,18 @@
 
 namespace App\Http\Controllers\Student;
 
+use App\Exceptions\CvTextExtractionException;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Student\StoreCVRequest;
 use App\Models\CV;
+use App\Services\CvTextExtractor;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\StreamedResponse;
+use Throwable;
 
 class CVController extends Controller
 {
@@ -22,6 +25,10 @@ class CVController extends Controller
      * CV download action), never a direct/guessable URL.
      */
     private const DISK = 'local';
+
+    public function __construct(private readonly CvTextExtractor $textExtractor)
+    {
+    }
 
     public function index(Request $request): JsonResponse
     {
@@ -39,6 +46,18 @@ class CVController extends Controller
      * stored path/filename -- a fresh, random server filename is generated
      * (never the original upload's filename), so nothing about the request
      * can influence where or under what name the file lands on disk.
+     *
+     * Phase 8A-5: after the file is stored, its text is extracted
+     * deterministically (see CvTextExtractor) and persisted as
+     * `parsed_text`. Extraction is best-effort and never blocks CV
+     * creation -- the file already passed Laravel's own `mimes:pdf`
+     * validation before reaching here, so a parse failure at this point
+     * (a scanned/image-only PDF with no text, or a corrupt/encrypted PDF
+     * that still identified as a PDF) is purely an internal processing
+     * outcome, not a reason to reject an otherwise-valid upload. Either
+     * case simply leaves `parsed_text` null -- see CvTextExtractor's own
+     * doc comment on why this phase doesn't need a separate status flag
+     * to distinguish them.
      */
     public function store(StoreCVRequest $request): JsonResponse
     {
@@ -53,16 +72,46 @@ class CVController extends Controller
 
         abort_unless($storedPath !== false, 500, 'Failed to store the CV file.');
 
-        $cv = $studentProfile->cvs()->create([
-            'title' => $request->validated('title'),
-            'file_path' => $storedPath,
-        ]);
+        $parsedText = $this->extractParsedText($storedPath);
+
+        try {
+            $cv = $studentProfile->cvs()->create([
+                'title' => $request->validated('title'),
+                'file_path' => $storedPath,
+                'parsed_text' => $parsedText,
+            ]);
+        } catch (Throwable $e) {
+            // The physical file was already stored -- if creating the DB
+            // row fails for any reason, remove it rather than leaving an
+            // orphan file no CV row will ever reference.
+            Storage::disk(self::DISK)->delete($storedPath);
+
+            throw $e;
+        }
 
         return response()->json([
             'success' => true,
             'message' => 'CV created successfully',
             'data' => $cv,
         ], 201);
+    }
+
+    /**
+     * Best-effort text extraction for the just-stored PDF at
+     * [storedPath]. Returns null (not an empty string) both when the PDF
+     * genuinely has no extractable text and when extraction itself fails
+     * -- see this class's own doc comment on why this phase collapses
+     * both cases to the same `parsed_text = null` outcome.
+     */
+    private function extractParsedText(string $storedPath): ?string
+    {
+        try {
+            $text = $this->textExtractor->extract($storedPath);
+        } catch (CvTextExtractionException) {
+            return null;
+        }
+
+        return $text === '' ? null : $text;
     }
 
     /**
