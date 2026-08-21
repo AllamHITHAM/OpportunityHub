@@ -6,6 +6,7 @@ use App\Exceptions\AssessmentAlreadyExistsException;
 use App\Exceptions\InvalidAssessmentSourceStatusException;
 use App\Models\Application;
 use App\Models\Assessment;
+use App\Support\InterviewContactDetailNormalizer;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 
@@ -83,7 +84,9 @@ class AssessmentService
                     'result' => null,
                 ]);
 
-                $interview = $assessment->interview()->create($interviewData);
+                $interview = $assessment->interview()->create(
+                    InterviewContactDetailNormalizer::normalize($interviewData)
+                );
 
                 $this->transitionToInAssessment($application);
 

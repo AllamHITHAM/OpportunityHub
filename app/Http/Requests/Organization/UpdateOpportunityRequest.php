@@ -28,6 +28,21 @@ class UpdateOpportunityRequest extends FormRequest
             'application_deadline' => ['nullable', 'date'],
             'positions_available' => ['nullable', 'integer', 'min:1'],
             'status' => ['nullable', 'in:draft,open,closed'],
+            // Phase 8B-3.2: when the key is present (even as an empty
+            // array), the controller replaces the Opportunity's eligible-
+            // majors set with exactly this list -- "sync the set
+            // cleanly". When absent entirely, existing eligible majors
+            // are left untouched. See `OpportunityController::update()`.
+            'eligible_majors' => ['sometimes', 'array', 'max:10'],
+            'eligible_majors.*' => [
+                'string',
+                'max:255',
+                function ($attribute, $value, $fail) {
+                    if (is_string($value) && trim($value) === '') {
+                        $fail('Eligible majors must not be blank.');
+                    }
+                },
+            ],
         ];
     }
 }

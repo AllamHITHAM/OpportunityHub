@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Mail\ApplicationRejectedMail;
 use App\Mail\InterviewRescheduledMail;
 use App\Mail\InterviewScheduledMail;
+use App\Mail\InvitationReceivedMail;
 use App\Mail\OfferAcceptedMail;
 use App\Mail\OfferDeclinedMail;
 use App\Mail\OfferReceivedMail;
@@ -23,12 +24,13 @@ use Illuminate\Support\Facades\Mail;
  * this service is only ever called from inside one of its convenience
  * methods, never directly from a controller or domain service.
  *
- * Seven workflow emails exist as of Phase 7A-4.2: Offer Received (the
+ * Eight workflow emails exist as of Phase 8B-3.1: Offer Received (the
  * Phase 7A-4.1 pilot), Interview Scheduled, Interview Rescheduled, Quiz
- * Available, Application Rejected, Offer Accepted, Offer Declined. Four
- * events remain in-app only (Application Submitted, Application
- * Shortlisted, Quiz Completed, Quiz Result Available) -- no method exists
- * here for them; see `NotificationService` for the full matrix.
+ * Available, Application Rejected, Offer Accepted, Offer Declined, and
+ * Invitation Received (Phase 8B-3.1). Six events remain in-app only
+ * (Application Submitted, Application Shortlisted, Quiz Completed, Quiz
+ * Result Available, Invitation Accepted, Invitation Declined) -- no method
+ * exists here for them; see `NotificationService` for the full matrix.
  *
  * Every call here queues (`Mail::queue()`), never sends synchronously
  * (`Mail::send()`) -- an SMTP failure must never block or roll back the
@@ -103,6 +105,7 @@ class EmailService
         ?int $durationMinutes = null,
         ?string $meetingLink = null,
         ?string $location = null,
+        ?string $contactPhone = null,
         ?string $interviewerName = null,
     ): void {
         Mail::to($recipient->email)->queue(new InterviewScheduledMail(
@@ -114,6 +117,7 @@ class EmailService
             durationMinutes: $durationMinutes,
             meetingLink: $meetingLink,
             location: $location,
+            contactPhone: $contactPhone,
             interviewerName: $interviewerName,
         ));
     }
@@ -132,6 +136,7 @@ class EmailService
         ?int $durationMinutes = null,
         ?string $meetingLink = null,
         ?string $location = null,
+        ?string $contactPhone = null,
         ?string $interviewerName = null,
     ): void {
         Mail::to($recipient->email)->queue(new InterviewRescheduledMail(
@@ -143,6 +148,7 @@ class EmailService
             durationMinutes: $durationMinutes,
             meetingLink: $meetingLink,
             location: $location,
+            contactPhone: $contactPhone,
             interviewerName: $interviewerName,
         ));
     }
@@ -182,6 +188,26 @@ class EmailService
             studentName: $recipient->name,
             opportunityTitle: $opportunityTitle,
             ctaUrl: $this->studentApplicationUrl($applicationId),
+        ));
+    }
+
+    /**
+     * Queues an "Invitation Received" email to the student an Organization
+     * just invited to apply (Phase 8B-3.1). `$invitationMessage` is the
+     * Organization's own optional note, included verbatim when present.
+     */
+    public function sendInvitationReceivedEmail(
+        User $recipient,
+        string $organizationName,
+        string $opportunityTitle,
+        ?string $invitationMessage = null,
+    ): void {
+        Mail::to($recipient->email)->queue(new InvitationReceivedMail(
+            studentName: $recipient->name,
+            organizationName: $organizationName,
+            opportunityTitle: $opportunityTitle,
+            ctaUrl: $this->studentInvitationsUrl(),
+            invitationMessage: $invitationMessage,
         ));
     }
 
@@ -243,6 +269,18 @@ class EmailService
     private function studentQuizUrl(int $assessmentId): string
     {
         return rtrim((string) config('app.frontend_url'), '/')."/student/assessments/{$assessmentId}/quiz";
+    }
+
+    /**
+     * Same as `studentApplicationUrl()`, but for the Student Invitations
+     * list route (mirrors `NotificationService`'s own
+     * `studentInvitationsPath()`) -- there is no single-invitation detail
+     * route in this app, so this always points at the list, exactly like
+     * the in-app notification's own `action_url` for the same event.
+     */
+    private function studentInvitationsUrl(): string
+    {
+        return rtrim((string) config('app.frontend_url'), '/').'/student/invitations';
     }
 
     /**

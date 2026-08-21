@@ -288,6 +288,7 @@ class InterviewResponseShapeTest extends TestCase
         return array_merge([
             'interview_type' => 'phone',
             'scheduled_at' => now()->addDays(3)->toDateTimeString(),
+            'contact_phone' => '+1 555-0100',
         ], $overrides);
     }
 

@@ -12,6 +12,7 @@ use App\Models\Application;
 use App\Models\Interview;
 use App\Services\AssessmentService;
 use App\Services\NotificationService;
+use App\Support\InterviewContactDetailNormalizer;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -113,7 +114,14 @@ class InterviewController extends Controller
         $previousInterviewType = $interview->interview_type;
 
         DB::transaction(function () use ($request, $interview, $previousScheduledAt, $previousInterviewType) {
-            $interview->update($request->validated());
+            // Phase Final-QA-1: a full-replace PUT still only carries
+            // whatever the client actually sent -- if the interview type
+            // changed and the client (correctly) omitted the now-irrelevant
+            // old detail field, `$request->validated()` simply won't
+            // contain that key, and a plain `update()` would leave the
+            // stale value in place. Normalizing here guarantees only the
+            // current type's detail field survives.
+            $interview->update(InterviewContactDetailNormalizer::normalize($request->validated()));
 
             // Phase 7A-2: "rescheduled" means the date/time or the
             // interview format itself changed -- not a logistics-only edit

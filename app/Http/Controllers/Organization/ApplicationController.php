@@ -25,7 +25,7 @@ class ApplicationController extends Controller
 
         $applications = Application::whereHas('opportunity', function ($query) use ($organizationId) {
             $query->where('organization_id', $organizationId);
-        })->with(['opportunity', 'studentProfile.user', 'cv'])
+        })->with(['opportunity', 'studentProfile.user', 'studentProfile.studentSkills.skill', 'studentProfile.educationVerification', 'cv'])
             ->orderByRaw($this->matchScoreRankingOrder())
             ->get();
 
@@ -46,7 +46,7 @@ class ApplicationController extends Controller
             ], 404);
         }
 
-        $applications = $opportunity->applications()->with(['studentProfile.user', 'cv'])
+        $applications = $opportunity->applications()->with(['studentProfile.user', 'studentProfile.studentSkills.skill', 'studentProfile.educationVerification', 'cv'])
             ->orderByRaw($this->matchScoreRankingOrder())
             ->get();
 
@@ -89,7 +89,7 @@ class ApplicationController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Application retrieved successfully',
-            'data' => $application->load(['opportunity', 'studentProfile.user', 'cv']),
+            'data' => $application->load(['opportunity', 'studentProfile.user', 'studentProfile.studentSkills.skill', 'studentProfile.educationVerification', 'cv']),
         ]);
     }
 
@@ -176,7 +176,7 @@ class ApplicationController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Application status updated successfully',
-            'data' => $application->fresh(['opportunity', 'studentProfile.user', 'cv']),
+            'data' => $application->fresh(['opportunity', 'studentProfile.user', 'studentProfile.studentSkills.skill', 'studentProfile.educationVerification', 'cv']),
         ]);
     }
 

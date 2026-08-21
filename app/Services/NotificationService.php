@@ -46,17 +46,22 @@ use InvalidArgumentException;
  * email, delegating the actual Mailable/transport/after-commit mechanics to
  * `EmailService` (constructor-injected) rather than calling `Mail::` itself
  * — mixing SMTP transport concerns into this class would defeat the point
- * of having a separate `EmailService` at all. **Seven of eleven events
- * queue an email as of Phase 7A-4.2**: `notifyOfferSent()` (the Phase
+ * of having a separate `EmailService` at all. **Eight of fourteen events
+ * queue an email as of Phase 8B-3.1**: `notifyOfferSent()` (the Phase
  * 7A-4.1 pilot), `notifyApplicationRejected()`, `notifyInterviewScheduled()`,
  * `notifyInterviewRescheduled()`, `notifyQuizPublished()`,
- * `notifyOfferAccepted()`, `notifyOfferDeclined()`. Four remain in-app
- * only, unchanged and queuing nothing: `notifyApplicationSubmitted()`,
- * `notifyApplicationShortlisted()`, `notifyQuizCompleted()`,
- * `notifyQuizResultAvailable()` — each fires too frequently per-user
- * (Submitted/Completed) or isn't independently actionable
- * (Shortlisted/Result Available) to justify an email; see
- * docs/BUSINESS_RULES.md section 8 for the full matrix and reasoning.
+ * `notifyOfferAccepted()`, `notifyOfferDeclined()`, and
+ * `notifyInvitationReceived()` (Phase 8B-3.1 — the Student otherwise has
+ * no reason to open the app and discover an invitation exists). Six
+ * remain in-app only, unchanged and queuing nothing:
+ * `notifyApplicationSubmitted()`, `notifyApplicationShortlisted()`,
+ * `notifyQuizCompleted()`, `notifyQuizResultAvailable()` — each fires too
+ * frequently per-user (Submitted/Completed) or isn't independently
+ * actionable (Shortlisted/Result Available) to justify an email — plus
+ * `notifyInvitationAccepted()`/`notifyInvitationDeclined()` (Phase 8B-3,
+ * organization-facing) — each fires too infrequently per organization to
+ * justify one; see docs/BUSINESS_RULES.md section 8 for the full matrix
+ * and reasoning.
  * Because every `EmailService::send*Email()` method queues with
  * after-commit semantics (see `QueuedTransactionalMail`), calling one here
  * — still inside the same `DB::transaction()` as the business mutation it
@@ -213,6 +218,83 @@ class NotificationService
     }
 
     // -----------------------------------------------------------------
+    // Invitation (Phase 8B-3, Flow B). As of Phase 8B-3.1,
+    // `notifyInvitationReceived()` also queues an email -- the Student
+    // otherwise has no reason to open the app and discover an invitation
+    // exists. `notifyInvitationAccepted()`/`notifyInvitationDeclined()`
+    // (organization-facing) remain in-app only: each fires too
+    // infrequently per organization to justify a second email type for
+    // this event pair, and the Organization is already actively watching
+    // its own sent invitations.
+    // -----------------------------------------------------------------
+
+    /**
+     * Student-facing: an Organization sent an invitation to apply.
+     */
+    public function notifyInvitationReceived(
+        User $studentUser,
+        string $organizationName,
+        string $opportunityTitle,
+        ?string $invitationMessage = null,
+    ): Notification {
+        $notification = $this->create(
+            $studentUser,
+            'Invitation to Apply',
+            "{$organizationName} invited you to apply for {$opportunityTitle}.",
+            type: 'opportunity',
+            priority: 'normal',
+            actionUrl: $this->studentInvitationsPath(),
+        );
+
+        $this->emails->sendInvitationReceivedEmail(
+            $studentUser,
+            $organizationName,
+            $opportunityTitle,
+            $invitationMessage,
+        );
+
+        return $notification;
+    }
+
+    /**
+     * Organization-facing: the student accepted an invitation.
+     */
+    public function notifyInvitationAccepted(
+        User $organizationUser,
+        string $studentName,
+        string $opportunityTitle,
+        int $opportunityId,
+    ): Notification {
+        return $this->create(
+            $organizationUser,
+            'Invitation Accepted',
+            "{$studentName} accepted your invitation to apply for {$opportunityTitle}.",
+            type: 'opportunity',
+            priority: 'normal',
+            actionUrl: $this->organizationOpportunityPath($opportunityId),
+        );
+    }
+
+    /**
+     * Organization-facing: the student declined an invitation.
+     */
+    public function notifyInvitationDeclined(
+        User $organizationUser,
+        string $studentName,
+        string $opportunityTitle,
+        int $opportunityId,
+    ): Notification {
+        return $this->create(
+            $organizationUser,
+            'Invitation Declined',
+            "{$studentName} declined your invitation to apply for {$opportunityTitle}.",
+            type: 'opportunity',
+            priority: 'normal',
+            actionUrl: $this->organizationOpportunityPath($opportunityId),
+        );
+    }
+
+    // -----------------------------------------------------------------
     // Interview
     // -----------------------------------------------------------------
 
@@ -228,8 +310,9 @@ class NotificationService
      *                                action_url below is unchanged by its
      *                                presence. Only `interview_type`,
      *                                `scheduled_at`, `duration_minutes`,
-     *                                `meeting_link`, `location`, and
-     *                                `interviewer_name` are ever read —
+     *                                `meeting_link`, `location`,
+     *                                `contact_phone` (Phase Final-QA-1),
+     *                                and `interviewer_name` are ever read —
      *                                never `interviewer_email`/`rating`/
      *                                `decision`/`notes`/`company_feedback`.
      */
@@ -257,6 +340,7 @@ class NotificationService
             durationMinutes: $interview->duration_minutes,
             meetingLink: $interview->meeting_link,
             location: $interview->location,
+            contactPhone: $interview->contact_phone,
             interviewerName: $interview->interviewer_name,
         );
 
@@ -297,6 +381,7 @@ class NotificationService
             durationMinutes: $interview->duration_minutes,
             meetingLink: $interview->meeting_link,
             location: $interview->location,
+            contactPhone: $interview->contact_phone,
             interviewerName: $interview->interviewer_name,
         );
 
@@ -512,5 +597,15 @@ class NotificationService
     private function organizationApplicationPath(int $applicationId): string
     {
         return "/organization/applications/{$applicationId}";
+    }
+
+    private function studentInvitationsPath(): string
+    {
+        return '/student/invitations';
+    }
+
+    private function organizationOpportunityPath(int $opportunityId): string
+    {
+        return "/organization/opportunities/{$opportunityId}";
     }
 }

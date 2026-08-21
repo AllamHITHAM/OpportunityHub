@@ -32,10 +32,20 @@ use Tests\TestCase;
  * `test_full_rollback_drops_the_assessments_table()`'s own step counts
  * need recalculating whenever a later phase adds a new migration on top --
  * see `OfferSentStatusMigrationTest`'s own doc comment for the identical
- * fragility. As of Phase 8A-5,
- * `2026_08_18_090000_add_parsed_text_to_cvs_table` now sits on top of
- * every migration this file rolls back to/past, so both step counts are
- * one higher than before that phase.
+ * fragility. As of Phase 8A-6.1, three migrations
+ * (`2026_08_18_100000_create_skill_suggestions_table`,
+ * `2026_08_18_100100_add_source_to_student_skills_table`,
+ * `2026_08_18_100200_create_cv_skill_evidence_table`) sat on top of every
+ * migration this file rolls back to/past; as of Phase 8B-1, one more
+ * (`2026_08_19_100000_create_education_verifications_table`) sits on top of
+ * those; as of Phase 8B-3, one more
+ * (`2026_08_20_100000_create_invitations_table`) sits on top of that, so
+ * both step counts are five higher than before Phase 8A-6.1; as of Phase
+ * 8B-3.2, one more
+ * (`2026_08_20_110000_create_opportunity_eligible_majors_table`) sits on
+ * top of that, making both step counts six higher; as of Phase Final-QA-1,
+ * one more (`2026_08_20_164118_add_contact_phone_to_interviews_table`) sits
+ * on top of that, making both step counts seven higher.
  */
 class AssessmentMigrationTest extends TestCase
 {
@@ -288,7 +298,7 @@ class AssessmentMigrationTest extends TestCase
         // to `interviews`, a no-op for this assertion) and the retarget
         // migration itself. Assessments must still exist immediately after,
         // since retarget's `down()` reads from it.
-        Artisan::call('migrate:rollback', ['--step' => 9]);
+        Artisan::call('migrate:rollback', ['--step' => 16]);
 
         $interview = DB::table('interviews')->first();
         $this->assertSame($applicationId, $interview->application_id);
@@ -316,7 +326,7 @@ class AssessmentMigrationTest extends TestCase
         // `create_questions_table`/`create_quizzes_table`, Phase 6B-0's
         // `add_in_assessment_status_to_applications_table`, the retarget
         // migration, and `create_assessments_table` itself.
-        Artisan::call('migrate:rollback', ['--step' => 10]);
+        Artisan::call('migrate:rollback', ['--step' => 17]);
 
         $this->assertFalse(\Illuminate\Support\Facades\Schema::hasTable('assessments'));
         $this->assertTrue(\Illuminate\Support\Facades\Schema::hasColumn('interviews', 'application_id'));
@@ -325,7 +335,7 @@ class AssessmentMigrationTest extends TestCase
 
     public function test_application_id_not_null_is_enforced_after_rollback(): void
     {
-        Artisan::call('migrate:rollback', ['--step' => 9]);
+        Artisan::call('migrate:rollback', ['--step' => 16]);
 
         $this->expectException(\Illuminate\Database\QueryException::class);
 
@@ -340,7 +350,7 @@ class AssessmentMigrationTest extends TestCase
 
     public function test_application_id_foreign_key_rejects_a_nonexistent_application_after_rollback(): void
     {
-        Artisan::call('migrate:rollback', ['--step' => 9]);
+        Artisan::call('migrate:rollback', ['--step' => 16]);
 
         $this->expectException(\Illuminate\Database\QueryException::class);
 
@@ -357,7 +367,7 @@ class AssessmentMigrationTest extends TestCase
     {
         $applicationId = $this->seedApplication();
 
-        Artisan::call('migrate:rollback', ['--step' => 9]);
+        Artisan::call('migrate:rollback', ['--step' => 16]);
 
         DB::table('interviews')->insert([
             'application_id' => $applicationId,
@@ -392,7 +402,7 @@ class AssessmentMigrationTest extends TestCase
      */
     private function rollBackRetargetMigrations(): void
     {
-        Artisan::call('migrate:rollback', ['--step' => 9]);
+        Artisan::call('migrate:rollback', ['--step' => 16]);
     }
 
     private function insertLegacyInterview(int $applicationId, array $overrides = []): int

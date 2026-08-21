@@ -15,6 +15,7 @@ class Interview extends Model
         'duration_minutes',
         'meeting_link',
         'location',
+        'contact_phone',
         'interviewer_name',
         'interviewer_email',
         'notes',

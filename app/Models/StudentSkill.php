@@ -12,6 +12,7 @@ class StudentSkill extends Model
         'skill_id',
         'level',
         'years_of_experience',
+        'source',
     ];
 
     public function studentProfile(): BelongsTo

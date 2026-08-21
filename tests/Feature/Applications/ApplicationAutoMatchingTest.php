@@ -74,7 +74,15 @@ class ApplicationAutoMatchingTest extends TestCase
     {
         $student = $this->studentWithProfileAndCv();
         $skill = Skill::create(['name' => 'Laravel']);
-        $opportunity = $this->openOpportunity(['field_of_study' => 'Computer Science']);
+        // Phase 8B-3.2: no `field_of_study` (and no explicit
+        // `eligible_majors`) -- this Opportunity is deliberately
+        // unrestricted, since this test's sparse-major student would
+        // otherwise be blocked by the new eligibility guard before ever
+        // reaching the matching logic this test actually exercises. The
+        // "field unavailable" comment/assertion below is unaffected: an
+        // absent `field_of_study` makes the field factor unavailable
+        // exactly the same way a mismatched one would have.
+        $opportunity = $this->openOpportunity();
         $opportunity->opportunitySkills()->create(['skill_id' => $skill->id, 'is_required' => true]);
 
         Sanctum::actingAs($student->user);

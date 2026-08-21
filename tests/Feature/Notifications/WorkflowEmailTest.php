@@ -5,12 +5,14 @@ namespace Tests\Feature\Notifications;
 use App\Mail\ApplicationRejectedMail;
 use App\Mail\InterviewRescheduledMail;
 use App\Mail\InterviewScheduledMail;
+use App\Mail\InvitationReceivedMail;
 use App\Mail\OfferAcceptedMail;
 use App\Mail\OfferDeclinedMail;
 use App\Mail\OfferReceivedMail;
 use App\Mail\QuizAvailableMail;
 use App\Models\Application;
 use App\Models\Interview;
+use App\Models\Invitation;
 use App\Models\Notification;
 use App\Models\Opportunity;
 use App\Models\OrganizationProfile;
@@ -38,6 +40,10 @@ use Tests\TestCase;
  * proving the four events that deliberately stay in-app-only (Application
  * Submitted/Shortlisted, Quiz Completed, Quiz Result Available) still queue
  * nothing.
+ *
+ * Extended Phase 8B-3.1 with Invitation Received (Flow B's invite step,
+ * `POST /organization/invitations`) -- the eighth and, for now, final
+ * workflow email.
  *
  * `Mail::fake()` is used for every test except the rollback one -- see that
  * test's own doc comment for why it deliberately does NOT use `Mail::fake()`.
@@ -266,6 +272,38 @@ class WorkflowEmailTest extends TestCase
                 && $mail->opportunityTitle === 'Backend Developer',
         );
         Mail::assertQueuedCount(1);
+    }
+
+    /**
+     * Phase Final-QA-1: the queued email for a Phone interview must
+     * actually render the contact number the student needs to attend —
+     * end-to-end, through the real HTTP endpoint and the real rendered
+     * Mailable, not just the `EmailService`/`NotificationService` unit
+     * boundary (see `EmailServiceTest`/`NotificationServiceTest` for those).
+     */
+    public function test_a_phone_interview_email_renders_the_contact_phone(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $student = $this->studentWithProfileAndCv();
+        $application = $this->applicationForStudent($opportunity, $student, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+        $this->postJson(
+            "/api/organization/applications/{$application->id}/interview",
+            $this->interviewPayload([
+                'interview_type' => 'phone',
+                'meeting_link' => null,
+                'contact_phone' => '+1 555-0100',
+            ]),
+        )->assertStatus(201);
+
+        Mail::assertQueued(
+            InterviewScheduledMail::class,
+            fn (InterviewScheduledMail $mail) => $mail->hasTo($student->user->email)
+                && $mail->contactPhone === '+1 555-0100'
+                && str_contains($mail->render(), '+1 555-0100'),
+        );
     }
 
     /**
@@ -613,6 +651,219 @@ class WorkflowEmailTest extends TestCase
         Mail::assertNothingQueued();
     }
 
+    // ===================================================================
+    // H. Invitation Received (Phase 8B-3.1)
+    // ===================================================================
+
+    public function test_sending_an_invitation_queues_invitation_received_to_the_student(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $student = $this->studentWithProfileAndCv();
+
+        Sanctum::actingAs($org->user);
+        $response = $this->postJson('/api/organization/invitations', [
+            'student_id' => $student->profile->id,
+            'opportunity_id' => $opportunity->id,
+            'message' => 'We think you would be a great fit!',
+        ]);
+        $response->assertStatus(201);
+
+        // The business action and the in-app Notification both happened,
+        // proving the email addition changed neither.
+        $this->assertDatabaseHas('invitations', [
+            'opportunity_id' => $opportunity->id,
+            'student_id' => $student->profile->id,
+            'status' => 'pending',
+        ]);
+        $this->assertDatabaseCount('notifications', 1);
+        $this->assertSame('Invitation to Apply', Notification::first()->title);
+        // Sending an invitation never creates an Application.
+        $this->assertDatabaseCount('applications', 0);
+
+        Mail::assertQueued(
+            InvitationReceivedMail::class,
+            fn (InvitationReceivedMail $mail) => $mail->hasTo($student->user->email)
+                && $mail->organizationName === 'Hiring Co'
+                && $mail->opportunityTitle === 'Backend Developer'
+                && $mail->invitationMessage === 'We think you would be a great fit!',
+        );
+        Mail::assertQueuedCount(1);
+    }
+
+    public function test_an_invitation_with_no_message_queues_email_with_a_null_message(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $student = $this->studentWithProfileAndCv();
+
+        Sanctum::actingAs($org->user);
+        $this->postJson('/api/organization/invitations', [
+            'student_id' => $student->profile->id,
+            'opportunity_id' => $opportunity->id,
+        ])->assertStatus(201);
+
+        Mail::assertQueued(
+            InvitationReceivedMail::class,
+            fn (InvitationReceivedMail $mail) => $mail->invitationMessage === null,
+        );
+    }
+
+    public function test_a_non_open_opportunity_queues_no_email(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org, ['status' => 'closed']);
+        $student = $this->studentWithProfileAndCv();
+
+        Sanctum::actingAs($org->user);
+        $response = $this->postJson('/api/organization/invitations', [
+            'student_id' => $student->profile->id,
+            'opportunity_id' => $opportunity->id,
+        ]);
+        $response->assertStatus(422);
+
+        $this->assertDatabaseCount('invitations', 0);
+        $this->assertDatabaseCount('notifications', 0);
+        Mail::assertNothingQueued();
+    }
+
+    public function test_another_organizations_opportunity_queues_no_email(): void
+    {
+        $orgA = $this->approvedOrganization();
+        $orgB = $this->approvedOrganization();
+        $opportunityB = $this->opportunityFor($orgB);
+        $student = $this->studentWithProfileAndCv();
+
+        Sanctum::actingAs($orgA->user);
+        $response = $this->postJson('/api/organization/invitations', [
+            'student_id' => $student->profile->id,
+            'opportunity_id' => $opportunityB->id,
+        ]);
+        $response->assertStatus(404);
+
+        $this->assertDatabaseCount('invitations', 0);
+        Mail::assertNothingQueued();
+    }
+
+    public function test_an_already_applied_student_queues_no_email(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $student = $this->studentWithProfileAndCv();
+        Application::create([
+            'student_id' => $student->profile->id,
+            'opportunity_id' => $opportunity->id,
+            'cv_id' => $student->cv->id,
+        ]);
+
+        Sanctum::actingAs($org->user);
+        $response = $this->postJson('/api/organization/invitations', [
+            'student_id' => $student->profile->id,
+            'opportunity_id' => $opportunity->id,
+        ]);
+        $response->assertStatus(409);
+
+        $this->assertDatabaseCount('invitations', 0);
+        Mail::assertNothingQueued();
+    }
+
+    public function test_an_ineligible_student_invitation_queues_no_email(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org, ['field_of_study' => 'Computer Science']);
+        $student = $this->studentWithProfileAndCv('Fine Arts');
+
+        Sanctum::actingAs($org->user);
+        $response = $this->postJson('/api/organization/invitations', [
+            'student_id' => $student->profile->id,
+            'opportunity_id' => $opportunity->id,
+        ]);
+        $response->assertStatus(422);
+
+        $this->assertDatabaseCount('invitations', 0);
+        $this->assertDatabaseCount('notifications', 0);
+        Mail::assertNothingQueued();
+    }
+
+    public function test_a_duplicate_invitation_queues_no_second_email(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $student = $this->studentWithProfileAndCv();
+
+        Sanctum::actingAs($org->user);
+        $this->postJson('/api/organization/invitations', [
+            'student_id' => $student->profile->id,
+            'opportunity_id' => $opportunity->id,
+        ])->assertStatus(201);
+        Mail::assertQueuedCount(1);
+
+        $response = $this->postJson('/api/organization/invitations', [
+            'student_id' => $student->profile->id,
+            'opportunity_id' => $opportunity->id,
+        ]);
+        $response->assertStatus(409);
+
+        $this->assertDatabaseCount('invitations', 1);
+        Mail::assertQueuedCount(1);
+    }
+
+    /**
+     * Proves the transaction-safety requirement directly, the same way
+     * `test_a_failure_after_notify_offer_sent_but_before_commit_prevents_both_the_offer_and_notification_from_being_committed()`
+     * does for Offers: calls `NotificationService::notifyInvitationReceived()`
+     * directly, inside a manually-created `DB::transaction()` that then
+     * throws, and proves neither the Invitation row nor the Notification
+     * row survive the rollback. `Organization\InvitationController::store()`
+     * itself has no explicit `DB::transaction()` wrapping its single
+     * `Invitation::create()` call (a single INSERT needs no multi-statement
+     * atomicity), so this test exercises the underlying after-commit
+     * mechanism `NotificationService`/`EmailService` share with every other
+     * workflow event directly, rather than through that controller.
+     *
+     * Deliberately does NOT use `Mail::fake()` -- see the identical Offer
+     * rollback test's own doc comment for the full reasoning (in short:
+     * `MailFake::queue()` bypasses the real after-commit deferral entirely,
+     * so asserting against it here would prove nothing about the actual
+     * mechanism under test).
+     */
+    public function test_a_failure_after_notify_invitation_received_but_before_commit_prevents_both_the_invitation_and_notification_from_being_committed(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $student = $this->studentWithProfileAndCv();
+
+        $caught = null;
+
+        try {
+            DB::transaction(function () use ($opportunity, $student, $org) {
+                Invitation::create([
+                    'opportunity_id' => $opportunity->id,
+                    'student_id' => $student->profile->id,
+                ]);
+
+                app(NotificationService::class)->notifyInvitationReceived(
+                    $student->user,
+                    $org->profile->organization_name,
+                    $opportunity->title,
+                );
+
+                throw new RuntimeException('Simulated failure after notifyInvitationReceived, before commit.');
+            });
+        } catch (RuntimeException $e) {
+            $caught = $e;
+        }
+
+        $this->assertNotNull($caught, 'Expected the simulated failure to propagate out of DB::transaction().');
+        $this->assertSame(
+            'Simulated failure after notifyInvitationReceived, before commit.',
+            $caught->getMessage(),
+        );
+
+        $this->assertDatabaseCount('invitations', 0);
+        $this->assertDatabaseCount('notifications', 0);
+    }
+
     // ---------------------------------------------------------------
     // Helpers -- mirror WorkflowNotificationTest's own conventions.
     // ---------------------------------------------------------------
@@ -648,14 +899,14 @@ class WorkflowEmailTest extends TestCase
         ], $overrides));
     }
 
-    private function studentWithProfileAndCv(): object
+    private function studentWithProfileAndCv(?string $major = null): object
     {
         $user = User::factory()->create([
             'role' => 'student',
             'status' => 'active',
         ]);
 
-        $profile = StudentProfile::create(['user_id' => $user->id]);
+        $profile = StudentProfile::create(['user_id' => $user->id, 'major' => $major]);
 
         $cv = $profile->cvs()->create([
             'title' => 'My CV',

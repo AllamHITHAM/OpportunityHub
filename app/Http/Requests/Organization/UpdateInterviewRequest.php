@@ -2,26 +2,27 @@
 
 namespace App\Http\Requests\Organization;
 
+use App\Http\Requests\Organization\Concerns\InteractsWithInterviewRules;
 use Illuminate\Foundation\Http\FormRequest;
 
 class UpdateInterviewRequest extends FormRequest
 {
+    use InteractsWithInterviewRules;
+
     public function authorize(): bool
     {
         return true;
     }
 
+    /**
+     * Full-replace PUT semantics — every field uses the exact same shared
+     * rule source as creation (`StoreInterviewRequest`/
+     * `StoreAssessmentRequest`), so the conditional detail-per-type
+     * requirement (Phase Final-QA-1) never drifts between create and
+     * update.
+     */
     public function rules(): array
     {
-        return [
-            'interview_type' => ['required', 'in:onsite,online,phone'],
-            'scheduled_at' => ['required', 'date'],
-            'duration_minutes' => ['nullable', 'integer', 'min:1'],
-            'meeting_link' => ['required_if:interview_type,online', 'nullable', 'string', 'max:2048'],
-            'location' => ['required_if:interview_type,onsite', 'nullable', 'string', 'max:255'],
-            'interviewer_name' => ['nullable', 'string', 'max:255'],
-            'interviewer_email' => ['nullable', 'email', 'max:255'],
-            'notes' => ['nullable', 'string', 'max:2000'],
-        ];
+        return $this->interviewCreationRules();
     }
 }

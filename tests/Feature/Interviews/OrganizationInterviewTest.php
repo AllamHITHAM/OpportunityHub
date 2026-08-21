@@ -584,6 +584,250 @@ class OrganizationInterviewTest extends TestCase
             ->assertJsonValidationErrors(['location']);
     }
 
+    /**
+     * Phase Final-QA-1: a Phone interview must not be schedulable without a
+     * contact number the Student can actually use to attend — the root bug
+     * this phase closes.
+     */
+    public function test_phone_interview_requires_contact_phone(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->postJson("/api/organization/applications/{$application->id}/interview", [
+            'interview_type' => 'phone',
+            'scheduled_at' => now()->addDays(2)->toDateTimeString(),
+        ]);
+
+        $response->assertStatus(422)
+            ->assertJsonValidationErrors(['contact_phone']);
+
+        $this->assertDatabaseCount('interviews', 0);
+    }
+
+    public function test_phone_interview_does_not_require_meeting_link_or_location(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->postJson("/api/organization/applications/{$application->id}/interview", [
+            'interview_type' => 'phone',
+            'scheduled_at' => now()->addDays(2)->toDateTimeString(),
+            'contact_phone' => '+1 555-0100',
+        ]);
+
+        $response->assertStatus(201);
+        $this->assertDatabaseHas('interviews', [
+            'interview_type' => 'phone',
+            'contact_phone' => '+1 555-0100',
+            'meeting_link' => null,
+            'location' => null,
+        ]);
+    }
+
+    public function test_online_interview_does_not_require_contact_phone_or_location(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->postJson("/api/organization/applications/{$application->id}/interview", [
+            'interview_type' => 'online',
+            'scheduled_at' => now()->addDays(2)->toDateTimeString(),
+            'meeting_link' => 'https://meet.example.com/room',
+        ]);
+
+        $response->assertStatus(201);
+        $this->assertDatabaseHas('interviews', [
+            'interview_type' => 'online',
+            'meeting_link' => 'https://meet.example.com/room',
+            'contact_phone' => null,
+            'location' => null,
+        ]);
+    }
+
+    public function test_onsite_interview_does_not_require_contact_phone_or_meeting_link(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->postJson("/api/organization/applications/{$application->id}/interview", [
+            'interview_type' => 'onsite',
+            'scheduled_at' => now()->addDays(2)->toDateTimeString(),
+            'location' => 'HQ, Room 4',
+        ]);
+
+        $response->assertStatus(201);
+        $this->assertDatabaseHas('interviews', [
+            'interview_type' => 'onsite',
+            'location' => 'HQ, Room 4',
+            'contact_phone' => null,
+            'meeting_link' => null,
+        ]);
+    }
+
+    public function test_online_interview_rejects_a_non_http_meeting_link(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->postJson("/api/organization/applications/{$application->id}/interview", [
+            'interview_type' => 'online',
+            'scheduled_at' => now()->addDays(2)->toDateTimeString(),
+            'meeting_link' => 'not-a-url',
+        ]);
+
+        $response->assertStatus(422)
+            ->assertJsonValidationErrors(['meeting_link']);
+    }
+
+    public function test_phone_interview_response_exposes_contact_phone(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->postJson("/api/organization/applications/{$application->id}/interview", [
+            'interview_type' => 'phone',
+            'scheduled_at' => now()->addDays(2)->toDateTimeString(),
+            'contact_phone' => '+1 555-0100',
+        ]);
+
+        $response->assertStatus(201)
+            ->assertJsonPath('data.contact_phone', '+1 555-0100');
+    }
+
+    /**
+     * Phase Final-QA-1 stale-data safety: switching an interview from
+     * phone to online must clear the now-irrelevant `contact_phone`, even
+     * though the update request never mentions it.
+     */
+    public function test_changing_interview_type_from_phone_to_online_clears_contact_phone(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+        $interview = $this->interviewFor($application, [
+            'interview_type' => 'phone',
+            'contact_phone' => '+1 555-0100',
+        ]);
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->putJson("/api/organization/interviews/{$interview->id}", [
+            'interview_type' => 'online',
+            'scheduled_at' => now()->addDays(3)->toDateTimeString(),
+            'meeting_link' => 'https://meet.example.com/new-room',
+        ]);
+
+        $response->assertStatus(200)
+            ->assertJsonPath('data.contact_phone', null)
+            ->assertJsonPath('data.meeting_link', 'https://meet.example.com/new-room');
+
+        $this->assertDatabaseHas('interviews', [
+            'id' => $interview->id,
+            'interview_type' => 'online',
+            'contact_phone' => null,
+            'meeting_link' => 'https://meet.example.com/new-room',
+        ]);
+    }
+
+    public function test_changing_interview_type_from_online_to_onsite_clears_meeting_link(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+        $interview = $this->interviewFor($application, [
+            'interview_type' => 'online',
+            'meeting_link' => 'https://meet.example.com/room',
+        ]);
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->putJson("/api/organization/interviews/{$interview->id}", [
+            'interview_type' => 'onsite',
+            'scheduled_at' => now()->addDays(3)->toDateTimeString(),
+            'location' => 'HQ, Room 4',
+        ]);
+
+        $response->assertStatus(200)
+            ->assertJsonPath('data.meeting_link', null)
+            ->assertJsonPath('data.location', 'HQ, Room 4');
+
+        $this->assertDatabaseHas('interviews', [
+            'id' => $interview->id,
+            'interview_type' => 'onsite',
+            'meeting_link' => null,
+            'location' => 'HQ, Room 4',
+        ]);
+    }
+
+    public function test_changing_interview_type_from_onsite_to_phone_clears_location(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+        $interview = $this->interviewFor($application, [
+            'interview_type' => 'onsite',
+            'location' => 'HQ, Room 4',
+        ]);
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->putJson("/api/organization/interviews/{$interview->id}", [
+            'interview_type' => 'phone',
+            'scheduled_at' => now()->addDays(3)->toDateTimeString(),
+            'contact_phone' => '+1 555-0199',
+        ]);
+
+        $response->assertStatus(200)
+            ->assertJsonPath('data.location', null)
+            ->assertJsonPath('data.contact_phone', '+1 555-0199');
+
+        $this->assertDatabaseHas('interviews', [
+            'id' => $interview->id,
+            'interview_type' => 'phone',
+            'location' => null,
+            'contact_phone' => '+1 555-0199',
+        ]);
+    }
+
+    /**
+     * Backward compatibility (Phase Final-QA-1): a legacy interview created
+     * before this phase, with no contact/access detail at all, must still
+     * be fetchable without error.
+     */
+    public function test_a_legacy_interview_with_no_contact_detail_can_still_be_fetched(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+        $interview = $this->interviewFor($application, ['interview_type' => 'phone', 'contact_phone' => null]);
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->getJson("/api/organization/interviews/{$interview->id}");
+
+        $response->assertStatus(200)
+            ->assertJsonPath('data.contact_phone', null);
+    }
+
     public function test_interview_rating_accepts_only_valid_values(): void
     {
         $org = $this->approvedOrganization();
@@ -685,6 +929,7 @@ class OrganizationInterviewTest extends TestCase
         return array_merge([
             'interview_type' => 'phone',
             'scheduled_at' => now()->addDays(3)->toDateTimeString(),
+            'contact_phone' => '+1 555-0100',
         ], $overrides);
     }
 

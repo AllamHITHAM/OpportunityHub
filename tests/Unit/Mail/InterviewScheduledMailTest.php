@@ -109,6 +109,40 @@ class InterviewScheduledMailTest extends TestCase
         $mail->assertDontSeeInHtml('Meeting link');
     }
 
+    public function test_shows_the_contact_phone_for_a_phone_interview(): void
+    {
+        $mail = $this->interviewScheduledMail(
+            interviewType: 'phone',
+            meetingLink: null,
+            contactPhone: '+1 555-0100',
+        );
+
+        $mail->assertSeeInHtml('+1 555-0100');
+    }
+
+    public function test_omits_the_contact_phone_when_absent(): void
+    {
+        $mail = $this->interviewScheduledMail(
+            interviewType: 'phone',
+            meetingLink: null,
+            contactPhone: null,
+        );
+
+        $mail->assertDontSeeInHtml('Contact phone');
+    }
+
+    public function test_does_not_show_a_contact_phone_for_an_onsite_interview_even_if_one_is_set(): void
+    {
+        $mail = $this->interviewScheduledMail(
+            interviewType: 'onsite',
+            location: '123 Main St',
+            meetingLink: null,
+            contactPhone: '+1 555-0100',
+        );
+
+        $mail->assertDontSeeInHtml('Contact phone');
+    }
+
     public function test_shows_the_interviewer_name_when_present(): void
     {
         $mail = $this->interviewScheduledMail(interviewerName: 'Jane Recruiter');
@@ -179,6 +213,7 @@ class InterviewScheduledMailTest extends TestCase
         ?int $durationMinutes = 60,
         ?string $meetingLink = 'https://meet.example.com/room',
         ?string $location = null,
+        ?string $contactPhone = null,
         ?string $interviewerName = null,
     ): InterviewScheduledMail {
         return new InterviewScheduledMail(
@@ -190,6 +225,7 @@ class InterviewScheduledMailTest extends TestCase
             durationMinutes: $durationMinutes,
             meetingLink: $meetingLink,
             location: $location,
+            contactPhone: $contactPhone,
             interviewerName: $interviewerName,
         );
     }

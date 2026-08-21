@@ -23,5 +23,11 @@ class DatabaseSeeder extends Seeder
         ]);
 
         $this->call(AdminUserSeeder::class);
+
+        // Phase 8A-6.1: safe to include here (unlike the Test User line
+        // above) -- unlike that unconditional create(), this seeder is
+        // fully idempotent and never duplicates or destroys a Skill row
+        // on a repeat run.
+        $this->call(BaselineSkillSeeder::class);
     }
 }

@@ -1,16 +1,21 @@
 <?php
 
 use App\Http\Controllers\Admin\DashboardController as AdminDashboardController;
+use App\Http\Controllers\Admin\EducationVerificationController as AdminEducationVerificationController;
 use App\Http\Controllers\Admin\OrganizationController as AdminOrganizationController;
 use App\Http\Controllers\Admin\SkillController as AdminSkillController;
+use App\Http\Controllers\Admin\SkillSuggestionController as AdminSkillSuggestionController;
 use App\Http\Controllers\Admin\UserController as AdminUserController;
 use App\Http\Controllers\Auth\AuthController;
+use App\Http\Controllers\Auth\EmailVerificationController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\Organization\ApplicationAnalysisController;
 use App\Http\Controllers\Organization\ApplicationController as OrganizationApplicationController;
 use App\Http\Controllers\Organization\AssessmentController as OrganizationAssessmentController;
+use App\Http\Controllers\Organization\CandidateController;
 use App\Http\Controllers\Organization\DashboardController as OrganizationDashboardController;
 use App\Http\Controllers\Organization\InterviewController as OrganizationInterviewController;
+use App\Http\Controllers\Organization\InvitationController as OrganizationInvitationController;
 use App\Http\Controllers\Organization\OfferController as OrganizationOfferController;
 use App\Http\Controllers\Organization\OpportunityController;
 use App\Http\Controllers\Organization\OpportunitySkillController;
@@ -21,7 +26,9 @@ use App\Http\Controllers\Student\ApplicationController as StudentApplicationCont
 use App\Http\Controllers\Student\AssessmentController as StudentAssessmentController;
 use App\Http\Controllers\Student\CVController;
 use App\Http\Controllers\Student\DashboardController as StudentDashboardController;
+use App\Http\Controllers\Student\EducationVerificationController as StudentEducationVerificationController;
 use App\Http\Controllers\Student\InterviewController as StudentInterviewController;
+use App\Http\Controllers\Student\InvitationController as StudentInvitationController;
 use App\Http\Controllers\Student\OfferController as StudentOfferController;
 use App\Http\Controllers\Student\QuizController as StudentQuizController;
 use App\Http\Controllers\Student\StudentProfileController;
@@ -35,6 +42,24 @@ Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:5,
 Route::get('/opportunities', [PublicOpportunityController::class, 'index']);
 Route::get('/opportunities/{opportunity}', [PublicOpportunityController::class, 'show']);
 
+// Phase 8B-2: password recovery -- both unauthenticated and role-agnostic
+// (a Student, Organization, or Admin account can all use them), so they
+// live alongside login/register above rather than inside any
+// role-specific group. Throttled the same as login (5 attempts/minute)
+// against brute-forcing either endpoint.
+Route::post('/forgot-password', [AuthController::class, 'forgotPassword'])->middleware('throttle:5,1');
+Route::post('/reset-password', [AuthController::class, 'resetPassword'])->middleware('throttle:5,1');
+
+// Phase 8B-2: the signed link a user clicks from their inbox -- see
+// EmailVerificationController::verify()'s own doc comment for why this is
+// deliberately not behind `auth:sanctum`. Named `verification.verify' so
+// `URL::temporarySignedRoute()` (used by the framework's own
+// `VerifyEmail` notification, which `VerifyEmailNotification` extends)
+// can resolve it.
+Route::get('/email/verify/{id}/{hash}', [EmailVerificationController::class, 'verify'])
+    ->middleware('throttle:6,1')
+    ->name('verification.verify');
+
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::get('/me', [AuthController::class, 'me']);
@@ -44,6 +69,13 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
     Route::get('/notifications', [NotificationController::class, 'index']);
     Route::put('/notifications/read-all', [NotificationController::class, 'markAllAsRead']);
     Route::put('/notifications/{notification}/read', [NotificationController::class, 'markAsRead']);
+
+    // Phase 8B-2: resend requires knowing *who* wants a new email, so
+    // (unlike forgot-password) this is authenticated -- no email input,
+    // always the current user. Same throttle as the verification link
+    // itself.
+    Route::post('/email/verification-notification', [EmailVerificationController::class, 'resend'])
+        ->middleware('throttle:6,1');
 });
 
 Route::middleware(['auth:sanctum', 'active', 'role:student'])->group(function () {
@@ -58,10 +90,15 @@ Route::middleware(['auth:sanctum', 'active', 'role:student', 'profile.exists'])-
     Route::get('/student/cvs/{cv}/download', [CVController::class, 'download']);
     Route::delete('/student/cvs/{cv}', [CVController::class, 'destroy']);
     Route::put('/student/cvs/{cv}/default', [CVController::class, 'setDefault']);
+    Route::post('/student/cvs/{cv}/extract-skills', [CVController::class, 'extractSkills']);
 
     Route::get('/student/skills', [StudentSkillController::class, 'index']);
     Route::post('/student/skills', [StudentSkillController::class, 'store']);
     Route::delete('/student/skills/{studentSkill}', [StudentSkillController::class, 'destroy']);
+
+    Route::get('/student/education-verification', [StudentEducationVerificationController::class, 'show']);
+    Route::post('/student/education-verification', [StudentEducationVerificationController::class, 'store']);
+    Route::get('/student/education-verification/document', [StudentEducationVerificationController::class, 'document']);
 
     Route::post('/opportunities/{opportunity}/apply', [StudentApplicationController::class, 'store']);
     Route::get('/student/applications', [StudentApplicationController::class, 'index']);
@@ -78,6 +115,10 @@ Route::middleware(['auth:sanctum', 'active', 'role:student', 'profile.exists'])-
     Route::get('/student/applications/{application}/offer', [StudentOfferController::class, 'show']);
     Route::put('/student/offers/{offer}/accept', [StudentOfferController::class, 'accept']);
     Route::put('/student/offers/{offer}/decline', [StudentOfferController::class, 'decline']);
+
+    Route::get('/student/invitations', [StudentInvitationController::class, 'index']);
+    Route::put('/student/invitations/{invitation}/accept', [StudentInvitationController::class, 'accept']);
+    Route::put('/student/invitations/{invitation}/decline', [StudentInvitationController::class, 'decline']);
 
     Route::get('/student/dashboard', [StudentDashboardController::class, 'index']);
 });
@@ -125,6 +166,9 @@ Route::middleware(['auth:sanctum', 'active', 'role:organization'])->group(functi
     Route::post('/organization/applications/{application}/offer', [OrganizationOfferController::class, 'store']);
     Route::get('/organization/applications/{application}/offer', [OrganizationOfferController::class, 'show']);
 
+    Route::get('/organization/candidates', [CandidateController::class, 'index']);
+    Route::post('/organization/invitations', [OrganizationInvitationController::class, 'store']);
+
     Route::get('/organization/dashboard', [OrganizationDashboardController::class, 'index']);
 });
 
@@ -140,6 +184,16 @@ Route::middleware(['auth:sanctum', 'active', 'role:admin'])->group(function () {
     Route::post('/admin/skills', [AdminSkillController::class, 'store']);
     Route::put('/admin/skills/{skill}', [AdminSkillController::class, 'update']);
     Route::delete('/admin/skills/{skill}', [AdminSkillController::class, 'destroy']);
+
+    Route::get('/admin/skill-suggestions', [AdminSkillSuggestionController::class, 'index']);
+    Route::put('/admin/skill-suggestions/{suggestion}/approve', [AdminSkillSuggestionController::class, 'approve']);
+    Route::put('/admin/skill-suggestions/{suggestion}/reject', [AdminSkillSuggestionController::class, 'reject']);
+
+    Route::get('/admin/education-verifications', [AdminEducationVerificationController::class, 'index']);
+    Route::get('/admin/education-verifications/{verification}', [AdminEducationVerificationController::class, 'show']);
+    Route::get('/admin/education-verifications/{verification}/document', [AdminEducationVerificationController::class, 'document']);
+    Route::put('/admin/education-verifications/{verification}/verify', [AdminEducationVerificationController::class, 'verify']);
+    Route::put('/admin/education-verifications/{verification}/reject', [AdminEducationVerificationController::class, 'reject']);
 
     Route::get('/admin/dashboard', [AdminDashboardController::class, 'index']);
 });

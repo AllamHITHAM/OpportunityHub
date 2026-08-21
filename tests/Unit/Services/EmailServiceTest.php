@@ -209,8 +209,28 @@ class EmailServiceTest extends TestCase
             return $mail->durationMinutes === null
                 && $mail->meetingLink === null
                 && $mail->location === null
+                && $mail->contactPhone === null
                 && $mail->interviewerName === null;
         });
+    }
+
+    public function test_send_interview_scheduled_email_forwards_the_contact_phone(): void
+    {
+        $student = $this->studentUser();
+
+        $this->emails->sendInterviewScheduledEmail(
+            $student,
+            'Backend Developer',
+            5,
+            interviewType: 'phone',
+            scheduledAt: Carbon::parse('2026-09-01 14:00:00'),
+            contactPhone: '+1 555-0100',
+        );
+
+        Mail::assertQueued(
+            InterviewScheduledMail::class,
+            fn (InterviewScheduledMail $mail) => $mail->contactPhone === '+1 555-0100',
+        );
     }
 
     // -----------------------------------------------------------------
@@ -234,6 +254,25 @@ class EmailServiceTest extends TestCase
             InterviewRescheduledMail::class,
             fn (InterviewRescheduledMail $mail) => $mail->hasTo($student->email)
                 && $mail->scheduledAt->equalTo(Carbon::parse('2026-09-10 09:00:00')),
+        );
+    }
+
+    public function test_send_interview_rescheduled_email_forwards_the_contact_phone(): void
+    {
+        $student = $this->studentUser();
+
+        $this->emails->sendInterviewRescheduledEmail(
+            $student,
+            'Backend Developer',
+            5,
+            interviewType: 'phone',
+            scheduledAt: Carbon::parse('2026-09-10 09:00:00'),
+            contactPhone: '+1 555-0199',
+        );
+
+        Mail::assertQueued(
+            InterviewRescheduledMail::class,
+            fn (InterviewRescheduledMail $mail) => $mail->contactPhone === '+1 555-0199',
         );
     }
 

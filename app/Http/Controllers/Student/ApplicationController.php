@@ -8,6 +8,7 @@ use App\Http\Requests\Student\ApplyToOpportunityRequest;
 use App\Models\Opportunity;
 use App\Services\MatchingService;
 use App\Services\NotificationService;
+use App\Services\OpportunityEligibilityService;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -21,6 +22,7 @@ class ApplicationController extends Controller
     public function __construct(
         private readonly NotificationService $notifications,
         private readonly MatchingService $matching,
+        private readonly OpportunityEligibilityService $eligibility,
     ) {
     }
 
@@ -65,6 +67,20 @@ class ApplicationController extends Controller
                 'message' => 'You have already applied to this opportunity',
                 'data' => null,
             ], 409);
+        }
+
+        // Phase 8B-3.2: the same guard `Organization\InvitationController::store()`
+        // enforces before creating an Invitation -- applied here too so a
+        // direct Apply can never admit a Student the Invitation path
+        // would have blocked. Shares one implementation
+        // (`OpportunityEligibilityService`) so the rule can never drift
+        // between the two entry points.
+        if (! $this->eligibility->isStudentEligible($opportunity, $studentProfile)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Your major is not eligible for this opportunity',
+                'data' => null,
+            ], 422);
         }
 
         try {

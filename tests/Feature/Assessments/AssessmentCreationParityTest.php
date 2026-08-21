@@ -40,6 +40,7 @@ class AssessmentCreationParityTest extends TestCase
         $payload = [
             'interview_type' => 'phone',
             'scheduled_at' => now()->addDays(3)->toDateTimeString(),
+            'contact_phone' => '+1 555-0100',
         ];
 
         Sanctum::actingAs($orgA->user);
@@ -85,6 +86,7 @@ class AssessmentCreationParityTest extends TestCase
         $response = $this->postJson("/api/organization/applications/{$application->id}/interview", [
             'interview_type' => 'phone',
             'scheduled_at' => now()->addDays(3)->toDateTimeString(),
+            'contact_phone' => '+1 555-0100',
         ]);
 
         $response->assertStatus(201)
@@ -109,6 +111,7 @@ class AssessmentCreationParityTest extends TestCase
             'interview' => [
                 'interview_type' => 'phone',
                 'scheduled_at' => now()->addDays(3)->toDateTimeString(),
+                'contact_phone' => '+1 555-0100',
             ],
         ]);
 
@@ -134,6 +137,7 @@ class AssessmentCreationParityTest extends TestCase
         $this->postJson("/api/organization/applications/{$application->id}/interview", [
             'interview_type' => 'phone',
             'scheduled_at' => now()->addDays(3)->toDateTimeString(),
+            'contact_phone' => '+1 555-0100',
         ])->assertStatus(201);
 
         $response = $this->postJson("/api/organization/applications/{$application->id}/assessments", [
@@ -141,6 +145,7 @@ class AssessmentCreationParityTest extends TestCase
             'interview' => [
                 'interview_type' => 'phone',
                 'scheduled_at' => now()->addDays(3)->toDateTimeString(),
+                'contact_phone' => '+1 555-0100',
             ],
         ]);
 
@@ -163,12 +168,14 @@ class AssessmentCreationParityTest extends TestCase
             'interview' => [
                 'interview_type' => 'phone',
                 'scheduled_at' => now()->addDays(3)->toDateTimeString(),
+                'contact_phone' => '+1 555-0100',
             ],
         ])->assertStatus(201);
 
         $response = $this->postJson("/api/organization/applications/{$application->id}/interview", [
             'interview_type' => 'phone',
             'scheduled_at' => now()->addDays(3)->toDateTimeString(),
+            'contact_phone' => '+1 555-0100',
         ]);
 
         $response->assertStatus(409)
@@ -258,6 +265,7 @@ class AssessmentCreationParityTest extends TestCase
             'interview' => [
                 'interview_type' => 'phone',
                 'scheduled_at' => now()->addDays(3)->toDateTimeString(),
+                'contact_phone' => '+1 555-0100',
             ],
         ]);
 
@@ -276,7 +284,7 @@ class AssessmentCreationParityTest extends TestCase
 
         $fields = [
             'interview_type', 'scheduled_at', 'duration_minutes',
-            'meeting_link', 'location', 'interviewer_name', 'interviewer_email', 'notes',
+            'meeting_link', 'location', 'contact_phone', 'interviewer_name', 'interviewer_email', 'notes',
         ];
 
         foreach ($fields as $field) {
@@ -355,6 +363,32 @@ class AssessmentCreationParityTest extends TestCase
         $genericResponse->assertStatus(422)->assertJsonValidationErrors(['interview.location']);
     }
 
+    public function test_phone_requires_contact_phone_identically_on_both_endpoints(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+
+        $legacyApplication = $this->applicationFor($opportunity, 'shortlisted');
+        $genericApplication = $this->applicationFor($opportunity, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+
+        $legacyResponse = $this->postJson("/api/organization/applications/{$legacyApplication->id}/interview", [
+            'interview_type' => 'phone',
+            'scheduled_at' => now()->addDays(2)->toDateTimeString(),
+        ]);
+        $genericResponse = $this->postJson("/api/organization/applications/{$genericApplication->id}/assessments", [
+            'type' => 'interview',
+            'interview' => [
+                'interview_type' => 'phone',
+                'scheduled_at' => now()->addDays(2)->toDateTimeString(),
+            ],
+        ]);
+
+        $legacyResponse->assertStatus(422)->assertJsonValidationErrors(['contact_phone']);
+        $genericResponse->assertStatus(422)->assertJsonValidationErrors(['interview.contact_phone']);
+    }
+
     public function test_legacy_validation_behavior_is_unchanged_by_the_shared_rule_source(): void
     {
         $rules = (new StoreInterviewRequest())->rules();
@@ -363,17 +397,21 @@ class AssessmentCreationParityTest extends TestCase
         $this->assertSame(['required', 'date'], $rules['scheduled_at']);
         $this->assertSame(['nullable', 'integer', 'min:1'], $rules['duration_minutes']);
         $this->assertSame(
-            ['required_if:interview_type,online', 'nullable', 'string', 'max:2048'],
+            ['required_if:interview_type,online', 'nullable', 'string', 'max:2048', 'url:http,https'],
             $rules['meeting_link']
         );
         $this->assertSame(
             ['required_if:interview_type,onsite', 'nullable', 'string', 'max:255'],
             $rules['location']
         );
+        $this->assertSame(
+            ['required_if:interview_type,phone', 'nullable', 'string', 'max:30'],
+            $rules['contact_phone']
+        );
         $this->assertSame(['nullable', 'string', 'max:255'], $rules['interviewer_name']);
         $this->assertSame(['nullable', 'email', 'max:255'], $rules['interviewer_email']);
         $this->assertSame(['nullable', 'string', 'max:2000'], $rules['notes']);
-        $this->assertCount(8, $rules);
+        $this->assertCount(9, $rules);
     }
 
     private function approvedOrganization(): object

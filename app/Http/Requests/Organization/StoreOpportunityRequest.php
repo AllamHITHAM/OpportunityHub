@@ -28,6 +28,23 @@ class StoreOpportunityRequest extends FormRequest
             'application_deadline' => ['nullable', 'date', 'after_or_equal:today'],
             'positions_available' => ['nullable', 'integer', 'min:1'],
             'status' => ['nullable', 'in:draft,open,closed'],
+            // Phase 8B-3.2: optional (not required) -- `field_of_study`
+            // was never required either, and requiring this would be a
+            // stricter new business rule than existed before, not just a
+            // backward-compatible addition. Left absent entirely (not
+            // even an empty array) on create means the Opportunity has no
+            // explicit majors and falls back to `field_of_study` (or is
+            // unrestricted) -- see `OpportunityEligibilityService`.
+            'eligible_majors' => ['sometimes', 'array', 'max:10'],
+            'eligible_majors.*' => [
+                'string',
+                'max:255',
+                function ($attribute, $value, $fail) {
+                    if (is_string($value) && trim($value) === '') {
+                        $fail('Eligible majors must not be blank.');
+                    }
+                },
+            ],
         ];
     }
 }

@@ -27,15 +27,28 @@ use Tests\TestCase;
  * which table they touch, so this file's own step count still needs
  * recalculating whenever a later phase adds a new migration on top --
  * exactly the same fragility `AssessmentMigrationTest` already has, contrary
- * to what an earlier version of this comment claimed. As of Phase 8A-5,
+ * to what an earlier version of this comment claimed. As of Phase 8B-1,
  * `2026_08_10_142102_create_offers_table`,
  * `2026_08_11_090000_add_assessment_and_offer_types_to_notifications_table`,
- * and `2026_08_18_090000_add_parsed_text_to_cvs_table` all sit on top of
- * this migration, so `--step => 4` is required to reach past all four and
+ * `2026_08_18_090000_add_parsed_text_to_cvs_table`,
+ * `2026_08_18_100000_create_skill_suggestions_table`,
+ * `2026_08_18_100100_add_source_to_student_skills_table`,
+ * `2026_08_18_100200_create_cv_skill_evidence_table`, and
+ * `2026_08_19_100000_create_education_verifications_table` all sit on top of
+ * this migration; as of Phase 8B-3, one more
+ * (`2026_08_20_100000_create_invitations_table`) sits on top of those; as
+ * of Phase 8B-3.2, one more
+ * (`2026_08_20_110000_create_opportunity_eligible_majors_table`) sits on
+ * top of that; as of Phase Final-QA-1, one more
+ * (`2026_08_20_164118_add_contact_phone_to_interviews_table`) sits on top
+ * of that, so `--step => 11` is required to reach past all eleven and
  * back to this migration's own effect (dropping `offers`/widening
- * `notifications.type`/dropping `cvs.parsed_text` along the way is harmless
- * for every assertion in this file, which only ever touches
- * `applications`).
+ * `notifications.type`/dropping `cvs.parsed_text`/dropping
+ * `skill_suggestions`/dropping `student_skills.source`/dropping
+ * `cv_skill_evidence`/dropping `education_verifications`/dropping
+ * `invitations`/dropping `opportunity_eligible_majors`/dropping
+ * `interviews.contact_phone` along the way is harmless for every assertion
+ * in this file, which only ever touches `applications`).
  */
 class OfferSentStatusMigrationTest extends TestCase
 {
@@ -82,7 +95,7 @@ class OfferSentStatusMigrationTest extends TestCase
         $applicationId = $this->seedApplication();
         DB::table('applications')->where('id', $applicationId)->update(['status' => 'offer_sent']);
 
-        Artisan::call('migrate:rollback', ['--step' => 4]);
+        Artisan::call('migrate:rollback', ['--step' => 11]);
 
         $this->assertSame(
             'in_assessment',
@@ -102,7 +115,7 @@ class OfferSentStatusMigrationTest extends TestCase
         $interviewScheduledId = $this->seedApplication();
         DB::table('applications')->where('id', $interviewScheduledId)->update(['status' => 'interview_scheduled']);
 
-        Artisan::call('migrate:rollback', ['--step' => 4]);
+        Artisan::call('migrate:rollback', ['--step' => 11]);
 
         $this->assertSame('pending', DB::table('applications')->where('id', $pendingId)->value('status'));
         $this->assertSame('shortlisted', DB::table('applications')->where('id', $shortlistedId)->value('status'));
@@ -122,7 +135,7 @@ class OfferSentStatusMigrationTest extends TestCase
             'cover_letter' => 'A very specific cover letter.',
         ]);
 
-        Artisan::call('migrate:rollback', ['--step' => 4]);
+        Artisan::call('migrate:rollback', ['--step' => 11]);
 
         $row = DB::table('applications')->where('id', $applicationId)->first();
         $this->assertSame('A very specific cover letter.', $row->cover_letter);
@@ -133,7 +146,7 @@ class OfferSentStatusMigrationTest extends TestCase
     {
         $applicationId = $this->seedApplication();
 
-        Artisan::call('migrate:rollback', ['--step' => 4]);
+        Artisan::call('migrate:rollback', ['--step' => 11]);
         Artisan::call('migrate');
 
         DB::table('applications')->where('id', $applicationId)->update(['status' => 'offer_sent']);
@@ -146,7 +159,7 @@ class OfferSentStatusMigrationTest extends TestCase
 
     public function test_rollback_removes_offer_sent_from_the_enum(): void
     {
-        Artisan::call('migrate:rollback', ['--step' => 4]);
+        Artisan::call('migrate:rollback', ['--step' => 11]);
 
         $applicationId = $this->seedApplication();
 

@@ -16,6 +16,9 @@ Your interview for **{{ $opportunityTitle }}** has been rescheduled. Here are th
 @if ($interviewType === 'onsite' && $location)
 **Location:** {{ $location }}
 @endif
+@if ($interviewType === 'phone' && $contactPhone)
+**Contact phone:** {{ $contactPhone }}
+@endif
 @if ($interviewerName)
 **Interviewer:** {{ $interviewerName }}
 @endif

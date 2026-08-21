@@ -16,7 +16,7 @@ class OpportunityController extends Controller
             ->whereHas('organizationProfile', function ($query) {
                 $query->where('approval_status', 'approved');
             })
-            ->with(['organizationProfile', 'opportunitySkills.skill'])
+            ->with(['organizationProfile', 'opportunitySkills.skill', 'eligibleMajorRecords'])
             ->when($request->filled('opportunity_type'), function ($query) use ($request) {
                 $query->where('opportunity_type', $request->input('opportunity_type'));
             })
@@ -54,7 +54,7 @@ class OpportunityController extends Controller
 
     public function show(Opportunity $opportunity): JsonResponse
     {
-        $opportunity->loadMissing(['organizationProfile', 'opportunitySkills.skill']);
+        $opportunity->loadMissing(['organizationProfile', 'opportunitySkills.skill', 'eligibleMajorRecords']);
 
         if ($opportunity->status !== 'open' || $opportunity->organizationProfile?->approval_status !== 'approved') {
             return response()->json([

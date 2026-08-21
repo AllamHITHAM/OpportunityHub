@@ -43,13 +43,13 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 ### POST /api/register/student
 - Auth: none · Role: none · Middleware: none
 - Body: `name` (required, string, max:255), `email` (required, email, unique), `password` (required, min:8, confirmed)
-- Success: 201 — `{"data": {"user": {...}, "token": "..."}}`. `role` is always forced to `student` server-side.
+- Success: 201 — `{"data": {"user": {...}, "token": "..."}}`. `role` is always forced to `student` server-side. **Phase 8B-2:** a verification email is queued for the new account (see section 1a) — this never blocks or fails the registration response, and the account is fully usable (can log in, use every feature) before verifying.
 - Errors: 422 (validation)
 
 ### POST /api/register/organization
 - Auth: none · Role: none · Middleware: none
 - Body: `name`, `email`, `password` (as above) + `organization_name` (required, max:255), `organization_type` (required, in: company, university, ngo, training_center, government, other), `industry`/`description`/`website`/`logo`/`phone` (nullable)
-- Success: 201 — `{"data": {"user": {..., "organizationProfile": {...}}, "token": "..."}}`. `role` forced to `organization`; `organization_profiles.approval_status` defaults to `pending` (never client-settable).
+- Success: 201 — `{"data": {"user": {..., "organizationProfile": {...}}, "token": "..."}}`. `role` forced to `organization`; `organization_profiles.approval_status` defaults to `pending` (never client-settable). **Phase 8B-2:** same verification email as student registration — queued only after the account and its profile are both fully committed.
 - Errors: 422 (validation)
 
 ### POST /api/login
@@ -65,8 +65,37 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 ### GET /api/me
 - Auth: required · Middleware: `auth:sanctum`
-- Success: 200 — `{"data": <authenticated user>}`
+- Success: 200 — `{"data": <authenticated user>}`. **Phase 8B-2:** the user object now always includes an appended `email_verified` boolean (derived from `email_verified_at`) alongside the raw timestamp itself.
 - Errors: 401
+
+---
+
+## 1a. Password Recovery & Email Verification (Phase 8B-2)
+
+Built entirely on Laravel's own password-broker and signed-URL infrastructure — no custom token system, no second email subsystem. See docs/BUSINESS_RULES.md section 1a for the full privacy/security/gating rules behind these endpoints.
+
+### POST /api/forgot-password
+- Auth: none · Role: none (works for Student, Organization, and Admin accounts alike — password recovery is a User-level concern, not role-specific) · Middleware: `throttle:5,1`
+- Body: `email` (required, email)
+- Success: 200 — `{"success": true, "message": "If an account exists for this email, password reset instructions have been sent.", "data": null}`. **This exact response is returned whether or not the email belongs to a real account** — never used to enumerate registered accounts. Uses Laravel's `Password::sendResetLink()` broker: a hashed token is stored in `password_reset_tokens` (plaintext token only ever appears in the emailed link), respecting the broker's own 60-minute expiry and 60-second per-email resend throttle (`config/auth.php`).
+- Errors: 422 (malformed/missing email), 429 (rate-limited after 5 requests/minute from the same client)
+
+### POST /api/reset-password
+- Auth: none · Role: none · Middleware: `throttle:5,1`
+- Body: `email` (required, email), `token` (required, string — from the reset link), `password` (required, min:8, confirmed)
+- Success: 200 — `{"success": true, "message": "Your password has been reset successfully.", "data": null}`. The new password is hashed via the same `'password' => 'hashed'` model cast registration uses (no separate hashing code). **Every existing Sanctum token for this user is revoked** — see docs/BUSINESS_RULES.md section 1a for this decision. The token is single-use: `Password::reset()` deletes the token row on success, so a second attempt with the same token always fails.
+- Errors: 422 (validation, or an invalid/expired/already-used token — Laravel's own translated broker message, e.g. "This password reset token is invalid."), 429 (rate-limited)
+
+### GET /api/email/verify/{id}/{hash}
+- Auth: none (self-authorizing via a cryptographic signature — see below) · Role: none · Middleware: `throttle:6,1`
+- The link a user clicks from their inbox. Not a JSON endpoint — always redirects (302) to `{FRONTEND_URL}/email-verified?status=success` or `...?status=invalid`, never a raw error page or crash. Deliberately not behind `auth:sanctum`: an email client navigating here carries no Bearer token, so the request is authorized purely by Laravel's own signed-URL signature (`$request->hasValidSignature()`) plus a per-user hash (`sha1(email)`) — both of which cover every route parameter, so tampering with `{id}` (e.g. trying to verify a different account) breaks the signature and is rejected the same as an expired or forged link.
+- Already-verified is safe/idempotent — re-visiting a valid link after verifying does nothing further (no error, same success redirect).
+
+### POST /api/email/verification-notification
+- Auth: required · Role: none · Middleware: `auth:sanctum, active, throttle:6,1`
+- No body — always resends to the authenticated user's own email. Safe/idempotent if already verified (no email sent, still 200).
+- Success: 200 — `{"success": true, "message": "Verification link sent." | "Your email is already verified.", "data": null}`
+- Errors: 401 (unauthenticated), 429 (rate-limited after 6 requests/minute)
 
 ---
 
@@ -115,21 +144,48 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 - Success: 200 — unsets `is_default` on all the student's other CVs, sets it on this one (only code path allowed to do so)
 - Errors: 401, 403, 404
 
+### POST /api/student/cvs/{cv}/extract-skills
+- Same middleware
+- **New in Phase 8A-6 — AI CV Skill Extraction, the first external-AI feature in this project.** Sends the CV's already-extracted `parsed_text` (Phase 8A-5) to the configured AI provider (Groq, called directly over HTTP — see docs/ARCHITECTURE.md) and returns structured skill suggestions. **Suggestion-only**: this endpoint never writes to `student_skills`, `skills`, or `cvs` — nothing is persisted by calling it. Only `parsed_text` is sent to the AI provider; the student's name, email, password, tokens, `match_score`, offers, application status, and interview/company feedback are never included. `parsed_text` itself is never returned in the response, exactly as with every other CV endpoint.
+- Success: 200 — `data: {"skills": [{"name": string, "confidence": number (0.0–1.0), "skill_id": number|null, "is_available": boolean, "already_added": boolean, "suggestion_id": number|null, "suggestion_status": string|null}]}`. `skill_id`/`is_available` reflect whether the suggested name matches an existing Admin-owned `Skill` catalog entry by normalized (trim/lowercase/whitespace-collapsed) match — no new `Skill` record is ever created directly from an AI suggestion. `already_added` is `true` when the current student already has that skill. At most 20 suggestions, deduplicated case-insensitively, ordered by confidence descending.
+- **Phase 8A-6.1: an unmatched name now also creates or reuses a pending catalog suggestion**, returned as `skill_id: null, is_available: false, suggestion_id: <id>, suggestion_status: "pending"` — see `GET/PUT /api/admin/skill-suggestions/*` below for how an Admin reviews it. Repeated extraction of the same unmatched name (by this or another student) reuses the same pending suggestion rather than creating duplicates. A matched suggestion instead has `suggestion_id: null, suggestion_status: null`. Once an Admin approves a suggestion, a later extraction call resolves that name as a normal catalog match.
+- To accept a matched suggestion, call the **existing** `POST /api/student/skills` (below) with the suggestion's `skill_id` — there is no separate "accept AI suggestion" endpoint. A `pending`/`rejected` suggestion (`skill_id: null`) cannot be added yet.
+- Errors: 401, 403, 404 (not found / not yours), 422 ("Text could not be extracted from this CV." — no `parsed_text` available, e.g. a scanned PDF or a legacy unparsed row), 503 (AI provider unavailable or returned an unusable response — missing configuration, timeout, non-2xx response, or malformed structured output; the message is always a safe, generic one, never the provider's raw error or API key)
+
 ### GET /api/student/skills
 - Same middleware
-- Success: 200 — list with `skill` relation loaded
+- Success: 200 — list with `skill` relation loaded. **Phase 8A-6.1:** each row also carries `source` (`manual` or `cv_ai`) — see docs/BUSINESS_RULES.md section 9a for what each value means.
 - Errors: 401, 403, 404
 
 ### POST /api/student/skills
 - Same middleware
-- Body: `skill_id` (required, integer, exists:skills,id), `level` (required, in: beginner, intermediate, advanced, expert), `years_of_experience` (nullable, numeric, between:0,60)
+- Body: `skill_id` (required, integer, exists:skills,id), `level` (required, in: beginner, intermediate, advanced, expert), `years_of_experience` (nullable, numeric, between:0,60), `source` (**Phase 8A-6.1**, nullable, in: manual, cv_ai — defaults to `manual`), `cv_id` (**Phase 8A-6.1**, nullable, integer, exists:cvs,id, required when `source` is `cv_ai`)
+- **Phase 8A-6.1:** when `source` is `cv_ai`, the backend independently verifies (never trusting the client claim alone) that this exact skill was actually identified from this exact CV for this exact student, via a server-written evidence record from the extract-skills flow above. If no matching evidence exists — including a spoofed skill/CV pairing or another student's CV — the request is rejected; the row is never stored with a false `cv_ai` source. When `source` is `manual` (or omitted), no evidence is required, exactly as before this phase.
 - Success: 201
-- Errors: 401, 403, 404, 409 ("You have already added this skill"), 422
+- Errors: 401, 403, 404, 409 ("You have already added this skill"), 422 (validation, **or Phase 8A-6.1:** "This skill could not be verified as CV-supported for the given CV." when a `cv_ai` claim has no matching evidence)
 
 ### DELETE /api/student/skills/{studentSkill}
 - Same middleware
 - Success: 200
 - Errors: 401, 403, 404
+
+### GET /api/student/education-verification
+- Same middleware
+- **New in Phase 8B-1.** Returns the authenticated student's current education-verification state. If the student has never submitted one, returns a controlled `{"status": "not_submitted", "institution_name": null, "degree_or_program": null, "rejection_reason": null, "submitted_at": null, "reviewed_at": null}` (still 200, not 404 — "nothing submitted yet" is a normal state here). `document_path` and the reviewing admin's id are never included in this response.
+- Success: 200 — `data: {"institution_name", "degree_or_program", "status": "pending"|"verified"|"rejected"|"not_submitted", "rejection_reason", "submitted_at", "reviewed_at"}`
+- Errors: 401, 403, 404 ("You must create a student profile first")
+
+### POST /api/student/education-verification
+- Same middleware
+- **New in Phase 8B-1.** `multipart/form-data`: `institution_name` (required, max:255), `degree_or_program` (required, max:255), `file` (required, `mimes:pdf`, `max:5120` KB — same limits as CV upload). The stored document lives under `storage/app/private/education-verifications/{student_id}/{uuid}.pdf` (the `local` disk, same as CVs) — never a client-influenced path or filename. The request body can never set `status`, `reviewed_at`, or `reviewed_by_admin_id` — those three fields aren't read from the request at all; every new/resubmitted row is always forced to `status: "pending"` with review metadata cleared.
+- **First submission** creates the row. **Resubmission after a `rejected` review** replaces the same row (`status` resets to `pending`, `rejection_reason`/`reviewed_at`/`reviewed_by_admin_id` are cleared) and safely swaps the physical file — the new file is stored and the DB row updated first; the previous managed file is deleted only after that succeeds. **Resubmission is blocked while `status` is `verified`** — see docs/BUSINESS_RULES.md.
+- Success: 201 (first submission) or 200 (resubmission)
+- Errors: 401, 403, 404 ("You must create a student profile first"), 409 ("Your education has already been verified and cannot be resubmitted." — attempting to replace a `verified` row), 422 (missing/invalid `institution_name`/`degree_or_program`, missing/non-PDF `file`, `file` over 5 MB)
+
+### GET /api/student/education-verification/document
+- Same middleware
+- **New in Phase 8B-1.** Streams the student's own education-verification PDF back to them (`Content-Type: application/pdf`, served inline) — no `{id}` in the route at all, since a student only ever has one verification, reached through their own profile.
+- Errors: 401, 403, 404 (no verification submitted yet, or the file no longer exists on disk)
 
 ### GET /api/student/applications
 - Same middleware
@@ -163,9 +219,11 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 ### POST /api/organization/opportunities
 - Middleware: `auth:sanctum, active, role:organization, org.approved` (blocks unapproved organizations — 403 "Organization is not approved to publish opportunities")
-- Body: `title` (required), `description` (required), `opportunity_type` (required, in: job, internship, volunteer, scholarship, competition), `employment_type` (required, in: full_time, part_time, contract), `work_mode` (required, in: remote, hybrid, onsite), `experience_level` (required, in: no_experience, junior, mid, senior, expert), `education_level` (nullable, in: high_school, diploma, bachelor, master, phd), `field_of_study`/`location` (nullable), `salary_min`/`salary_max` (nullable, numeric, `salary_max >= salary_min`), `application_deadline` (nullable, date, must be today or later), `positions_available` (nullable, integer, min:1), `status` (nullable, in: draft, open, closed)
+- Body: `title` (required), `description` (required), `opportunity_type` (required, in: job, internship, volunteer, scholarship, competition), `employment_type` (required, in: full_time, part_time, contract), `work_mode` (required, in: remote, hybrid, onsite), `experience_level` (required, in: no_experience, junior, mid, senior, expert), `education_level` (nullable, in: high_school, diploma, bachelor, master, phd), `field_of_study`/`location` (nullable), `salary_min`/`salary_max` (nullable, numeric, `salary_max >= salary_min`), `application_deadline` (nullable, date, must be today or later), `positions_available` (nullable, integer, min:1), `status` (nullable, in: draft, open, closed), `eligible_majors` (**Phase 8B-3.2**, optional, array of up to 10 non-blank strings, max:255 each — see below)
 - Success: 201
 - Errors: 401, 403, 422
+
+**Multi-major eligibility (Phase 8B-3.2):** `eligible_majors` is an optional array of plain major names (e.g. `["Computer Engineering", "Computer Science", "Software Engineering"]`) stored in a dedicated `opportunity_eligible_majors` table, deduplicated case/whitespace-insensitively (see docs/BUSINESS_RULES.md). Omitting the field entirely on create means no explicit majors (falls back to `field_of_study`, or is unrestricted — see the eligibility rule below). Every Opportunity response now also includes a derived `eligible_majors: string[]` field (never the internal normalized values), alongside the pre-existing `field_of_study`, which is untouched and still returned as before.
 
 ### GET /api/organization/opportunities
 - Middleware: `auth:sanctum, active, role:organization`
@@ -180,6 +238,7 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 ### PUT /api/organization/opportunities/{opportunity}
 - Same middleware
 - Body: same as POST, except `application_deadline` has **no** "must be in the future" restriction (an already-passed deadline can still be edited/closed)
+- **`eligible_majors` sync behavior (Phase 8B-3.2):** when the key is present in the request — including an explicit empty array `[]` — the Opportunity's entire eligible-majors set is replaced with exactly that list. When the key is absent entirely, the existing eligible majors are left untouched.
 - Success: 200
 - Errors: 401, 403, 404, 422
 
@@ -232,7 +291,7 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 ### POST /api/opportunities/{opportunity}/apply
 - Middleware: `auth:sanctum, active, role:student, profile.exists`
 - Body: `cv_id` (required, integer, must belong to the authenticated student — fails validation exactly like a nonexistent ID otherwise), `cover_letter` (nullable, max:2000)
-- Checks in order: opportunity must be open + organization approved (404 otherwise) → deadline not passed (422) → student must have ≥1 CV (422) → not already applied (409) → create.
+- Checks in order: opportunity must be open + organization approved (404 otherwise) → deadline not passed (422) → student must have ≥1 CV (422) → not already applied (409) → **student's major must be eligible for this opportunity (422, "Your major is not eligible for this opportunity" — Phase 8B-3.2, see section 5a)** → create.
 - Success: 201 — `status` defaults to `pending`, `applied_at` auto-set by the database.
 - Errors: 401, 403, 404, 409, 422
 
@@ -268,7 +327,52 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 **Organization applicant ranking (Phase 8A-1):** both list endpoints above order results by `match_score` descending, applications with no score yet (`null`) always sorted after every calculated score regardless of value (including `0`), and `applied_at` ascending as the deterministic tie-breaker within a group of equal (or equally-null) scores. Uses only the already-stored `match_score` column — never calls `MatchingService`, never calculates or mutates a score as a side effect of listing. `GET /organization/applications/{application}` (single-item) and the Student endpoints are unaffected — this ordering applies to the two list endpoints only.
 
+**Organization-visible skill evidence (Phase 8A-6.1):** all three response shapes above (both list endpoints and the single-item endpoint) now eager-load `student_profile.student_skills.skill`, so each applicant's skills are visible with their evidence `source` (`manual` or `cv_ai` — see docs/BUSINESS_RULES.md section 9a). `parsed_text`, the AI provider's raw request/response, extraction confidence, and any suggestion metadata are never included.
+
+**Organization-visible education-verification status (Phase 8B-1):** all three response shapes above also carry `student_profile.education_verification_status` — one of `not_submitted`, `pending`, `verified`, `rejected`. This is a derived, status-only field; the underlying `EducationVerification` record (institution/degree, document path, rejection reason, reviewing admin id) is never included anywhere in an Organization-facing response — see docs/BUSINESS_RULES.md section 9b.
+
 **Student-visible Application fields (Phase 8A-1):** `match_score` — an organization-internal matching/ranking aid (see section 8) — is omitted from every Student-facing response that returns an `Application`, directly or nested: `GET /api/student/applications`, the `POST /api/opportunities/{opportunity}/apply` success response, and the nested `application` on `GET /api/student/interviews`, `GET /api/student/assessments`, and `GET /api/student/assessments/{assessment}`. Applied per-response via `App\Http\Controllers\Student\Concerns\HidesInternalApplicationFields`, not a model-level `$hidden` — the same convention `HidesInternalInterviewFields`/`HidesInternalQuestionFields` already established for the identical class of problem. The Organization-facing endpoints above are unaffected and continue to return `match_score` exactly as before (`null` = not yet calculated, `0`–`100` = calculated).
+
+---
+
+## 5a. Candidate Search & Invitations (Phase 8B-3)
+
+Flow B: an Organization discovers Students and invites them to apply, instead of only ever seeing Students who apply on their own (Flow A, section 5). Both flows converge into the exact same `applications` pipeline — see docs/ARCHITECTURE.md.
+
+### GET /api/organization/candidates
+- Middleware: `auth:sanctum, active, role:organization`
+- Query params (all optional): `name`, `major`, `university`, `graduation_year`, `skill`, `opportunity_id`
+- Filter/search only over structured `student_profiles`/`student_skills` data — no semantic search, no AI ranking, no `MatchingService` call. Only Students whose `user.status = 'active'` are returned.
+- When `opportunity_id` is given, it must belong to the authenticated organization (404 otherwise) and each result additionally carries `already_applied`/`already_invited` booleans for that specific opportunity — no match score is calculated or included. **Phase 8B-3.2**: the result set is also filtered down to only Students eligible for that opportunity's accepted majors (see the eligibility rule below) — the general (no `opportunity_id`) search is unaffected and still returns all active Student profiles.
+- Success: 200 — an array of `{id, name, university, major, graduation_year, education_verification_status, skills: [{name, source}], already_applied?, already_invited?}`. `id` is the `student_profiles.id` to pass as `student_id` below. Never includes email, phone, bio, profile image, raw CV text, or any education-verification document path.
+- Errors: 401, 403, 404 (`opportunity_id` not found / not this organization's)
+
+### POST /api/organization/invitations
+- Middleware: `auth:sanctum, active, role:organization`
+- Body: `student_id` (required, integer, must exist), `opportunity_id` (required, integer, must exist), `message` (nullable, string, max:1000)
+- Checks in order: opportunity must belong to this organization (404) → opportunity must be `open` (422) → student must exist and be active (404) → student must not have already applied to this opportunity (409) → no existing invitation for this student/opportunity pair, in any status (409) → **student's major must be eligible for this opportunity (422, "Student major is not eligible for this opportunity" — Phase 8B-3.2)**.
+- Success: 201 — the created invitation, `status` always `pending`.
+- Errors: 401, 403, 404, 409, 422
+- Never creates an `Application`. Never calls `MatchingService`.
+- **Phase 8B-3.1**: on success, the invited student receives both the existing in-app notification and a queued "You have been invited to apply" email (subject, organization name, opportunity title, the invitation `message` if one was given, and a "View Invitation" link to `{FRONTEND_URL}/student/invitations`). Only a genuinely created invitation queues this email — a 404/409/422 response queues nothing. See section 9.
+- **Phase 8B-3.2 — major eligibility rule** (shared by this endpoint, the Apply endpoint in section 5, and the opportunity-scoped Candidate Search above, via one `OpportunityEligibilityService`): (A) if the opportunity has explicit `eligible_majors`, the student's `major` must normalize-match one of them; else (B) if the opportunity has a non-blank legacy `field_of_study`, the student's `major` must normalize-match it; else (C) the opportunity is unrestricted and any student is eligible. Normalization is trim + lowercase + collapse-whitespace (`App\Support\MajorNormalizer`, mirrors `SkillNameNormalizer`). This is strictly a pre-application eligibility guard — it never uses Skills or `match_score`, which continue to drive suitability ranking only after an `Application` already exists.
+
+### GET /api/student/invitations
+- Middleware: `auth:sanctum, active, role:student, profile.exists`
+- Success: 200 — only the authenticated student's own invitations, newest first, each with its nested `opportunity` (`id`, `title`) and `opportunity.organization_profile` (`organization_name`).
+- Errors: 401, 403
+
+### PUT /api/student/invitations/{invitation}/accept
+- Same middleware
+- Marks the invitation `accepted`. **Does not create an `Application`** — `applications.cv_id` is required and no CV is chosen at invitation time, so the Student is instead expected to complete the existing Apply flow (`POST /api/opportunities/{opportunity}/apply`, section 5) for `invitation.opportunity_id`, picking a CV exactly as a direct (Flow A) applicant would. If the student already applied independently before accepting, accepting still succeeds — it only ever records consent.
+- Success: 200 — the updated invitation.
+- Errors: 401, 403, 404 (not found / not this student's), 409 (already responded to)
+
+### PUT /api/student/invitations/{invitation}/decline
+- Same middleware
+- Marks the invitation `declined`. No `Application` is created, no `match_score` is calculated.
+- Success: 200 — the updated invitation.
+- Errors: 401, 403, 404, 409 (already responded to)
 
 ---
 
@@ -286,6 +390,7 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
   "assessment_id": 1,
   "interview_type": "phone",
   "scheduled_at": "...",
+  "contact_phone": "+1 555-0100",
   "status": "scheduled",
   "decision": "pending",
   "application": { "id": 5, "status": "in_assessment", "...": "..." },
@@ -304,9 +409,11 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 ### POST /api/organization/applications/{application}/interview
 - Middleware: `auth:sanctum, active, role:organization`
-- Body: `interview_type` (required, in: onsite, online, phone), `scheduled_at` (required, date), `duration_minutes` (nullable, integer, min:1, default 60), `meeting_link` (required if `interview_type=online`), `location` (required if `interview_type=onsite`), `interviewer_name`/`interviewer_email`/`notes` (nullable)
+- Body: `interview_type` (required, in: onsite, online, phone), `scheduled_at` (required, date), `duration_minutes` (nullable, integer, min:1, default 60), `meeting_link` (required if `interview_type=online`, must be a valid `http`/`https` URL, max:2048), `location` (required if `interview_type=onsite`, max:255), `contact_phone` (required if `interview_type=phone`, max:30 — Phase Final-QA-1), `interviewer_name`/`interviewer_email`/`notes` (nullable)
+- **Conditional attendance detail (Phase Final-QA-1)**: exactly one of `meeting_link`/`location`/`contact_phone` is required, matching `interview_type` — a Phone interview can no longer be scheduled with no contact number, an Online interview with no meeting link, or an Onsite interview with no address, closing the gap where a Student could see a scheduled interview with no way to actually attend it. The other two fields are never required for a given type (e.g. a phone interview never requires `meeting_link`/`location`) and, if sent anyway, are silently dropped — see the "stale detail clearing" note below. Enforced once in `App\Http\Requests\Organization\Concerns\InteractsWithInterviewRules`, shared by this endpoint, `PUT .../interviews/{interview}`, and the generic `POST .../assessments` endpoint (section 7) — never duplicated.
+- **Stale detail clearing (Phase Final-QA-1)**: at persistence time (`App\Support\InterviewContactDetailNormalizer`), only the field relevant to the interview's *current* `interview_type` is ever stored — the other two are always forced to `null`, even if a request body includes one. This matters most on update (see `PUT .../interviews/{interview}` below): changing `interview_type` (e.g. phone → online) clears the now-irrelevant old detail (`contact_phone`) even when the update request never mentions that field at all.
 - Preconditions: application must be `shortlisted` or (legacy) `interview_scheduled` (422 otherwise; `in_assessment` is never an allowed source — see docs/BUSINESS_RULES.md section 5); one interview per application max (409 if one already exists) — enforced via the one-`Assessment`-per-`Application` rule (section 7), not directly on `interviews` any more.
-- Success: 201 — in one DB transaction: creates an `Assessment` (`type=interview`, `status=scheduled`), creates the `Interview` under it, and sets the application's **`status = in_assessment`** (Phase 6B-0 — previously `interview_scheduled`; see docs/BUSINESS_RULES.md section 5) and `reviewed_at = now()`. Response `data` is the interview in the shape above.
+- Success: 201 — in one DB transaction: creates an `Assessment` (`type=interview`, `status=scheduled`), creates the `Interview` under it, and sets the application's **`status = in_assessment`** (Phase 6B-0 — previously `interview_scheduled`; see docs/BUSINESS_RULES.md section 5) and `reviewed_at = now()`. Response `data` is the interview in the shape above, including `contact_phone` alongside the pre-existing `meeting_link`/`location`.
 - Errors: 401, 403, 404, 409, 422
 
 ### GET /api/organization/interviews
@@ -321,7 +428,8 @@ Every other error (401/403/404/409) uses the standard `{success: false, message:
 
 ### PUT /api/organization/interviews/{interview}
 - Same middleware
-- Body: same schedulable fields as POST (never `decision`/`rating`/`company_feedback`/`status`/`completed_at`)
+- Body: same schedulable fields as POST, full-replace semantics — `interview_type`/`scheduled_at` are required on every call, same conditional `meeting_link`/`location`/`contact_phone` requirement as POST (never `decision`/`rating`/`company_feedback`/`status`/`completed_at`)
+- **Type-change stale-data safety (Phase Final-QA-1)**: if `interview_type` changes (e.g. a phone interview is switched to online), the now-irrelevant old detail is cleared even though the request only ever needs to send the new type's field — a request switching to `online` with only `meeting_link` set still results in `contact_phone = null` afterward, never a stale leftover value. See the stale detail clearing note under the POST endpoint above.
 - Success: 200
 - Errors: 401, 403, 404, 422
 
@@ -359,6 +467,7 @@ An application has at most one `Assessment`. An `Assessment` has `type` (`interv
       "duration_minutes": 60,
       "meeting_link": "https://meet.example.com/...",
       "location": null,
+      "contact_phone": null,
       "interviewer_name": "Jane Recruiter",
       "interviewer_email": "jane@example.com",
       "notes": "..."
@@ -377,7 +486,7 @@ An application has at most one `Assessment`. An `Assessment` has `type` (`interv
     }
   }
   ```
-  `type` is required (`in:interview,quiz`). `interview` is required when `type=interview`; its fields are validated by the exact same shared rule source as the legacy endpoint's body (`interview_type`, `scheduled_at` required; `meeting_link` required when `interview_type=online`; `location` required when `interview_type=onsite`; `duration_minutes`/`interviewer_name`/`interviewer_email`/`notes` optional) — see `App\Http\Requests\Organization\Concerns\InteractsWithInterviewRules`. `quiz` is required when `type=quiz`: `quiz.title` required, string, max 255; `quiz.instructions` nullable string; `quiz.time_limit_minutes` nullable integer, min 1; `quiz.passing_score` required, integer, 0–100. `questions` is **not** accepted here at all — see section 7a for adding them afterward.
+  `type` is required (`in:interview,quiz`). `interview` is required when `type=interview`; its fields are validated by the exact same shared rule source as the legacy endpoint's body (`interview_type`, `scheduled_at` required; `meeting_link` required when `interview_type=online`; `location` required when `interview_type=onsite`; `contact_phone` required when `interview_type=phone`, Phase Final-QA-1; `duration_minutes`/`interviewer_name`/`interviewer_email`/`notes` optional) — see `App\Http\Requests\Organization\Concerns\InteractsWithInterviewRules`. `quiz` is required when `type=quiz`: `quiz.title` required, string, max 255; `quiz.instructions` nullable string; `quiz.time_limit_minutes` nullable integer, min 1; `quiz.passing_score` required, integer, 0–100. `questions` is **not** accepted here at all — see section 7a for adding them afterward.
 - Preconditions (both types): application must be `shortlisted` or (legacy) `interview_scheduled` (422 otherwise; `in_assessment` is never an allowed source, since a real assessment already exists for it by construction); one assessment per application max (409 if one already exists) — identical rules for both types, enforced by the same service (`AssessmentService`).
 - **Unknown `type`** (anything other than `interview`/`quiz`): standard Laravel validation failure (422, `{message, errors}` shape).
 - Success (`type=interview`): 201 — creates an `Assessment` (`type=interview`, `status=scheduled`, `result=null`) and its `Interview` in one transaction, and sets the application's **`status = in_assessment`** and `reviewed_at = now()`. Response `data` is the `Assessment`, with `application` and `interview` nested — **not** `data.interview.application` (deliberately hidden at this response's call site via `makeHidden('application')`, since it would just duplicate `data.application` one level down; the legacy Interview endpoints are unaffected and keep exposing it).
@@ -404,7 +513,7 @@ An application has at most one `Assessment`. An `Assessment` has `type` (`interv
 - Success: 200 — same filtered `interview`/`quiz.questions` shape as the index above.
 - Errors: 401, 403, 404 (assessment does not belong to this student)
 
-**Student-visible Interview fields**: `GET /api/student/assessments`, `GET /api/student/assessments/{assessment}`, and `GET /api/student/interviews` (section 6) all return `Interview` with `interviewer_email`, `company_feedback`, `rating`, and `decision` omitted — these are organization-internal (post-interview evaluation data, and a staff member's email), applied per-response via `App\Http\Controllers\Student\Concerns\HidesInternalInterviewFields`, not a model-level `$hidden`. The Organization-facing Interview/Assessment endpoints above are unaffected and continue to return every field. A student's own outcome is `assessment.result` (`null` until a real decision is recorded), not `interview.decision`.
+**Student-visible Interview fields**: `GET /api/student/assessments`, `GET /api/student/assessments/{assessment}`, and `GET /api/student/interviews` (section 6) all return `Interview` with `interviewer_email`, `company_feedback`, `rating`, and `decision` omitted — these are organization-internal (post-interview evaluation data, and a staff member's email), applied per-response via `App\Http\Controllers\Student\Concerns\HidesInternalInterviewFields`, not a model-level `$hidden`. The Organization-facing Interview/Assessment endpoints above are unaffected and continue to return every field. A student's own outcome is `assessment.result` (`null` until a real decision is recorded), not `interview.decision`. **`meeting_link`/`location`/`contact_phone` are never hidden from the student** — the whole point of Phase Final-QA-1 is that the Student needs whichever one is relevant to actually attend the interview.
 
 **Quiz-type assessments on the Student endpoints above**: as of Phase 6B-3, both `GET /api/student/assessments` and `GET /api/student/assessments/{assessment}` eager-load `quiz.questions` for a `type=quiz` assessment, with `correct_answer` stripped from every question the exact same way `GET /api/student/assessments/{assessment}/quiz` (section 7a) already does — see "Student-visible Quiz fields" there. A `type=interview` assessment's `quiz` key is simply absent (not an error).
 
@@ -608,9 +717,9 @@ Both endpoints run the same rule-based `MatchingService` v1.1 (Phase 8A-2): skil
 
 **No push notifications exist yet.** `action_url` is always an app-relative Flutter route path (e.g. `/student/applications/42`), matching the Flutter app's own `AppRoutes` constants exactly — never a full domain URL. Flutter's Notification Center (Phase 7A-3) is the primary way to observe a notification.
 
-**Queued transactional email is fully enabled as of Phase 7A-4.2, for seven of the eleven events.** `App\Services\EmailService` (constructor-injected into `NotificationService`) queues the matching Mailable from inside seven `NotificationService` convenience methods — `notifyOfferSent()` → `OfferReceivedMail` (Phase 7A-4.1 pilot), `notifyApplicationRejected()` → `ApplicationRejectedMail`, `notifyInterviewScheduled()` → `InterviewScheduledMail`, `notifyInterviewRescheduled()` → `InterviewRescheduledMail`, `notifyQuizPublished()` → `QuizAvailableMail`, `notifyOfferAccepted()` → `OfferAcceptedMail`, `notifyOfferDeclined()` → `OfferDeclinedMail` — all using the same after-commit-safe mechanism (`App\Mail\QueuedTransactionalMail` — see docs/ARCHITECTURE.md). The remaining four events (Application Submitted, Application Shortlisted, Quiz Completed, Quiz Result Available) are deliberately **in-app only** — see docs/BUSINESS_RULES.md section 8 for the full matrix and reasoning. **No live SMTP delivery is configured** — `MAIL_MAILER` stays `log` by default in development, and no external provider credentials exist yet; real SMTP configuration/testing is Phase 7A-4.3. A queue worker (`php artisan queue:work`, `emails` queue) is required to process any queued email job at all, delivered or merely logged.
+**Queued transactional email is enabled for eight of the fourteen events as of Phase 8B-3.1.** `App\Services\EmailService` (constructor-injected into `NotificationService`) queues the matching Mailable from inside eight `NotificationService` convenience methods — `notifyOfferSent()` → `OfferReceivedMail` (Phase 7A-4.1 pilot), `notifyApplicationRejected()` → `ApplicationRejectedMail`, `notifyInterviewScheduled()` → `InterviewScheduledMail`, `notifyInterviewRescheduled()` → `InterviewRescheduledMail`, `notifyQuizPublished()` → `QuizAvailableMail`, `notifyOfferAccepted()` → `OfferAcceptedMail`, `notifyOfferDeclined()` → `OfferDeclinedMail`, and `notifyInvitationReceived()` → `InvitationReceivedMail` (Phase 8B-3.1) — all using the same after-commit-safe mechanism (`App\Mail\QueuedTransactionalMail` — see docs/ARCHITECTURE.md). The remaining six events (Application Submitted, Application Shortlisted, Quiz Completed, Quiz Result Available, Invitation Accepted, Invitation Declined) are deliberately **in-app only** — see docs/BUSINESS_RULES.md section 8 for the full matrix and reasoning. A queue worker (`php artisan queue:work --queue=emails,default --tries=3 --timeout=60`) is required to process any queued email job.
 
-**`notifications.type` supports 7 values** (widened in Phase 7A-1, `2026_08_11_090000_add_assessment_and_offer_types_to_notifications_table`): `system`, `application`, `interview`, `assessment`, `offer`, `organization`, `opportunity`. As of Phase 7A-2, `application`/`interview`/`assessment`/`offer` rows are now genuinely created by the workflow; `organization`/`opportunity` remain unused by any current event (no event in this phase's matrix needs them) and `system` is the untouched generic fallback.
+**`notifications.type` supports 7 values** (widened in Phase 7A-1, `2026_08_11_090000_add_assessment_and_offer_types_to_notifications_table`): `system`, `application`, `interview`, `assessment`, `offer`, `organization`, `opportunity`. As of Phase 7A-2, `application`/`interview`/`assessment`/`offer` rows are now genuinely created by the workflow. As of Phase 8B-3, the three Invitation events (`notifyInvitationReceived()`, `notifyInvitationAccepted()`, `notifyInvitationDeclined()`) use the existing `opportunity` type — no new migration was needed. `organization` remains unused by any current event and `system` is the untouched generic fallback.
 
 ### GET /api/notifications
 - Middleware: `auth:sanctum, active` (any role)
@@ -679,6 +788,51 @@ Both endpoints run the same rule-based `MatchingService` v1.1 (Phase 8A-2): skil
 - Same middleware
 - Success: 200
 - Errors: 401, 403, 404, 409 ("Cannot delete a skill that is currently in use")
+
+### GET /api/admin/skill-suggestions
+- Same middleware
+- **New in Phase 8A-6.1.** Lists pending catalog suggestions raised by the AI CV extraction flow (`GET /api/student/cvs/{cv}/extract-skills` above) awaiting Admin review. Only ever returns `status = pending` rows.
+- Success: 200 — list of `{"id", "name", "source", "status"}`
+- Errors: 401, 403
+
+### PUT /api/admin/skill-suggestions/{suggestion}/approve
+- Same middleware
+- **New in Phase 8A-6.1.** Creates a new `Skill` from the suggestion's name — or, if an equivalent `Skill` (by normalized name) already exists by the time of approval, links to that existing `Skill` instead of creating a duplicate. Sets the suggestion's `status` to `approved`.
+- Success: 200 — the updated suggestion, with the linked `Skill` loaded
+- Errors: 401, 403, 404, 409 ("This suggestion has already been reviewed" — already approved or rejected; no state change)
+
+### PUT /api/admin/skill-suggestions/{suggestion}/reject
+- Same middleware
+- **New in Phase 8A-6.1.** Sets the suggestion's `status` to `rejected`. Never creates a `Skill`.
+- Success: 200 — the updated suggestion
+- Errors: 401, 403, 404, 409 ("This suggestion has already been reviewed")
+
+### GET /api/admin/education-verifications
+- Same middleware
+- **New in Phase 8B-1.** Every submission (not just pending), pending ones listed first, oldest-submitted first within each group. Each row includes `student_profile.user` (name/email) so an Admin never has to cross-reference a bare student id. `document_path` is never included — see `GET .../document` below.
+- Success: 200
+
+### GET /api/admin/education-verifications/{verification}
+- Same middleware
+- **New in Phase 8B-1.** Single-item detail, same shape as the list, with `student_profile.user` loaded.
+- Errors: 401, 403, 404
+
+### GET /api/admin/education-verifications/{verification}/document
+- Same middleware
+- **New in Phase 8B-1.** Streams the submission's PDF for Admin review (`Content-Type: application/pdf`, served inline). No public/static URL exists for it — this is the only way it's ever reachable.
+- Errors: 401, 403, 404 (the file no longer exists on disk)
+
+### PUT /api/admin/education-verifications/{verification}/verify
+- Same middleware
+- **New in Phase 8B-1.** Approves the submission: `status` → `verified`, `reviewed_at` → now, `reviewed_by_admin_id` → the acting admin, `rejection_reason` cleared. "Verified" means an Admin reviewed the document and approved it — see docs/BUSINESS_RULES.md section 9b for the full trust-model statement.
+- Success: 200 — the updated verification
+- Errors: 401, 403, 404, 409 ("This education verification has already been reviewed." — already `verified` or `rejected`; no state change)
+
+### PUT /api/admin/education-verifications/{verification}/reject
+- Same middleware
+- **New in Phase 8B-1.** Body: `rejection_reason` (required, string, max:1000). Sets `status` → `rejected`, `reviewed_at` → now, `reviewed_by_admin_id` → the acting admin. Never mutates the stored document.
+- Success: 200 — the updated verification
+- Errors: 401, 403, 404, 409 ("This education verification has already been reviewed"), 422 (missing `rejection_reason`)
 
 ### GET /api/admin/dashboard
 - Same middleware

@@ -1485,6 +1485,900 @@ Flutter change.
 
 ---
 
+## AI CV Skill Extraction (Phase 8A-6)
+
+The first feature in this project that calls an external AI provider.
+Adds a suggestion-only skill-extraction step on top of Phase 8A-5's
+`cvs.parsed_text`: a Student can ask the backend to send their CV's
+already-extracted text to Groq, get back structured skill
+suggestions, and explicitly choose which ones to add to their profile
+through the **existing** Student Skill endpoint. The AI never mutates
+data on its own, never sees anything beyond the CV text, and never
+touches `match_score` or `MatchingService`.
+
+- **Provider: Groq, `openai/gpt-oss-120b` (default, configurable via
+  `GROQ_MODEL`), called directly over HTTP via its OpenAI-compatible Chat
+  Completions API.** No AI SDK was added to `composer.json` —
+  `AiSkillExtractionService` calls `POST
+  https://api.groq.com/openai/v1/chat/completions` via Laravel's built-in
+  `Http` facade with `Authorization: Bearer {GROQ_API_KEY}`, per this
+  phase's own explicit preference for the simplest provider-compatible
+  REST integration over an unnecessary PHP SDK dependency. Structured
+  JSON output is requested via `response_format: {"type": "json_schema",
+  "json_schema": {"strict": true, "schema": ...}}` — Groq's strict,
+  schema-guaranteed structured-output mode, currently supported on the
+  `openai/gpt-oss-20b` and `openai/gpt-oss-120b` models (verified against
+  Groq's official docs at the time this integration was built; `openai/
+  gpt-oss-120b` was chosen as the default both because it's the
+  recommended replacement for the earlier candidate model and because it
+  supports this strict mode, giving the same schema-guaranteed
+  reliability the original design required). All provider-specific code
+  (the endpoint URL, headers, request/response shape) is confined
+  entirely to `AiSkillExtractionService` — swapping providers later means
+  rewriting that one file.
+- **Configuration lives in `config/services.php` → `'groq'`.**
+  `env('GROQ_API_KEY')` / `env('GROQ_MODEL', 'openai/gpt-oss-120b')`
+  are read only there, never inside the service (`config('services.groq.*')`
+  instead) — the same convention already used for `postmark`/`resend`/`ses`/
+  `slack`. `.env.example` carries both keys as blank placeholders. The API
+  key is never sent to Flutter in any form.
+- **Minimum data sent to the provider: the CV's `parsed_text`, and
+  nothing else.** No student name, email, phone, exact user ID, password,
+  auth token, `match_score`, offers, application status, or interview/
+  company feedback ever reaches the request body — see
+  `AiSkillExtractionService::requestBody()`, and
+  `tests/Feature/AI/AiSkillExtractionServiceTest.php`'s explicit assertion
+  that none of that data appears in the outbound request.
+- **`App\Services\AiSkillExtractionService`** — the one place in the app
+  that talks to an AI provider. `extractSkills(CV $cv): array` builds the
+  request, calls the provider with a bounded 25-second timeout and no
+  retries (a single controlled attempt, appropriate for a synchronous
+  interactive Student action — no new queue infrastructure was introduced
+  for this), validates/normalizes/deduplicates the structured response
+  (trimmed, case-insensitive dedup keeping the highest-confidence
+  duplicate, confidence clamped to `[0.0, 1.0]`, capped at 20 suggestions),
+  and maps each name to the existing Admin-owned `Skill` catalog by exact
+  case-insensitive match. It never creates a `Skill` row, never writes a
+  `StudentSkill` row, never touches the `CV` row or `match_score`, and
+  never sends a notification or email.
+- **No new persisted table.** Given the project deadline and the
+  suggestion-only nature of the feature, suggestions are transient —
+  computed per-request and returned directly in the API response, never
+  stored. This also means the feature needed **zero new migrations**,
+  avoiding the pre-existing `--step`-count fragility in
+  `AssessmentMigrationTest`/`OfferSentStatusMigrationTest`/
+  `NotificationTypeMigrationTest` that Phase 8A-5 already had to work
+  around.
+- **Endpoint: `POST /api/student/cvs/{cv}/extract-skills`**
+  (`CVController::extractSkills`), same ownership/role/profile-completion
+  middleware stack as every other `/student/cvs/*` route. Ownership check
+  is the usual `student_id` comparison → 404 if not the caller's CV. If
+  `parsed_text` is null/blank (no extractable text — e.g. a scanned PDF,
+  or a legacy pre-Phase-8A-5 row), the controller returns 422 *before*
+  the service is ever called, with the message "Text could not be
+  extracted from this CV." Response data shape:
+  `{"skills": [{"name", "confidence", "skill_id", "is_available",
+  "already_added"}]}` — `parsed_text` itself is never returned (it's
+  already hidden at the model level per Phase 8A-5).
+- **`already_added` prevents duplicate-add offers client-side.** For each
+  catalog-matched suggestion, the service checks the current student's
+  existing `StudentSkill` rows and flags whether they already have it —
+  computed fresh on every extraction call, never cached, and never itself
+  a write.
+- **Unmatched suggestions are never silently turned into new Skill
+  records.** The Admin-owned catalog is the sole source of truth for
+  `Skill` rows (see Business Rule 9 below); a suggestion with no catalog
+  match comes back with `skill_id: null, is_available: false` and the
+  Flutter UI disables selecting it, with an inline "Not in skill catalog"
+  label. This is intentional, controlled AI behavior, not a gap.
+- **Accepting a suggestion reuses the existing Student Skill endpoint —
+  no second "accept" mutation endpoint was added.** Flutter's "Add
+  Selected Skills" action calls `POST /api/student/skills`
+  (`StudentSkillController::store`, unchanged) once per selected
+  suggestion, with a client-side default `level: 'intermediate'` (the AI
+  only ever produces a confidence score, never a proficiency level).
+- **Failure handling never risks CV/Profile/Application data.** Missing
+  `GROQ_API_KEY`, a network/timeout failure, a non-2xx provider
+  response (401/403/429/5xx), and a malformed/invalid structured response
+  are all caught inside `AiSkillExtractionService` and re-thrown as the
+  single `App\Exceptions\AiSkillExtractionException`, which
+  `CVController::extractSkills` always maps to a safe `503` with a
+  generic, user-safe message — never the provider's API key, raw stack
+  trace, or full provider response body. Technical detail (status code,
+  exception message) is logged server-side via `Log::error()` only.
+  `tests/Feature/AI/CvSkillExtractionEndpointTest.php` confirms a provider
+  failure leaves every table (`cvs`, `student_skills`) byte-for-byte
+  unchanged.
+- **No AI match_score, ever.** `AiSkillExtractionService` never computes,
+  requests, or returns a match score, ranking, or hire/no-hire signal of
+  any kind — the deterministic `MatchingService` from Phase 8A-2 remains
+  the sole, unmodified, authoritative source for `match_score`. See
+  Business Rule 9 below.
+- **No OCR, no DOCX.** Exactly like Phase 8A-5, a CV with no extractable
+  text (scanned/image-only PDF) is handled with a controlled message, not
+  a new capability — consistent with this phase's explicit scope
+  boundary.
+- **Flutter**: `CvSkillSuggestion` (new model, `lib/models/`) — strict
+  parsing of `name`/`confidence`/`skill_id`/`is_available`/`already_added`,
+  no `parsed_text` field exists on it at all. `CvRepository.extractSkills()`
+  (new method) calls the endpoint. `StudentSkillRepository` (new, minimal
+  — `lib/features/skills/data/`) adds the one method (`addSkill`) Flutter
+  needed to call the existing Student Skill endpoint; no other Student
+  Skills UI exists yet, and none was added beyond what this feature
+  needs. `StudentCvProvider` gained extraction/add-skills state
+  (`isExtracting`, `extractionErrorMessage`, `skillSuggestions`,
+  `isAddingSkills`, `addSkillsErrorMessage`) and two methods
+  (`extractSkills`, `addSelectedSkills`) rather than a new provider file —
+  the smallest architecture consistent with the existing CV feature.
+  `StudentCvScreen` gained an "Analyze CV" action on each CV card that
+  opens a bottom sheet (`_SkillSuggestionsSheet`) listing suggestions with
+  a checkbox per selectable one (disabled when unmatched or already
+  added) and an "Add Selected Skills" button.
+- **Tested via `tests/Feature/AI/AiSkillExtractionServiceTest.php`** (new
+  — every scenario uses `Http::fake()`, the real Groq API is never
+  called in automated tests: successful structured response, the correct
+  Groq endpoint and `Authorization: Bearer` header, the configured model
+  being sent, case-insensitive dedup, the 20-suggestion cap, confidence
+  clamping/defaulting, blank-name discarding, catalog mapping (matched
+  and unmatched), already-added detection, an empty `skills` array,
+  malformed JSON, an invalid top-level structure (including a response
+  missing `choices` entirely), 401/403/429/5xx provider responses, a
+  connection failure, missing API key configuration, and the
+  sensitive-data-never-sent assertion) and
+  `tests/Feature/AI/CvSkillExtractionEndpointTest.php`** (new — owning-
+  student success, wrong-student 404, wrong-role 403, unauthenticated
+  401, incomplete-profile 404, null/blank/legacy `parsed_text` all 422,
+  the response never contains `parsed_text`, already-added flagging,
+  extraction never creates a `StudentSkill` row or modifies the `CV` row,
+  a pre-existing `StudentSkill` is untouched, and a provider failure
+  leaves all DB state unchanged).
+
+## Dynamic Skill Catalog + Skill Evidence + Baseline Skill Seeder (Phase 8A-6.1)
+
+Three minimal, tightly-scoped additions on top of Phase 8A-6: a realistic
+baseline Skill Catalog, a path for AI-extracted unknown skills to grow the
+catalog under Admin control instead of dead-ending, and evidence tracking
+on `StudentSkill` so Organizations and Students can see whether a skill is
+CV-supported or self-declared. No certificate/credential verification, no
+`MatchingService` change, and no evidence-weighted scoring — all
+explicitly deferred.
+
+- **`App\Support\SkillNameNormalizer`** — the one normalization rule used
+  everywhere a skill name is compared: trim, collapse internal whitespace,
+  lowercase (`mb_strtolower`). Deliberately simple and deterministic (no
+  fuzzy/Levenshtein/NLP matching) so "AutoCAD"/"autocad"/"AUTOCAD" always
+  collapse together without over-matching unrelated names. Used by AI
+  catalog mapping, pending-suggestion dedup, and Admin approval's
+  duplicate check.
+- **`database/seeders/BaselineSkillSeeder`** — a real Laravel seeder (not
+  manual SQL), 63 deduplicated skills across Civil Engineering,
+  Architecture, Computer/Software Engineering, Electrical/Electronics
+  Engineering, Mechanical Engineering, Business, and Healthcare. Each
+  entry is `Skill::firstOrCreate(['name' => ...], ['category' => ...])`,
+  plus an in-memory normalized-name guard as defense-in-depth against an
+  accidental duplicate in the source array. Fully idempotent — running it
+  any number of times creates no duplicates, never touches an existing
+  Skill row (manual or previously seeded), and respects the existing
+  unique-name constraint. Wired into `DatabaseSeeder` (safe to include
+  unconditionally, unlike the non-idempotent Test User seeder).
+- **`skill_suggestions` table / `SkillSuggestion` model (new)** —
+  `name`, `normalized_name` (indexed), `source` (`ai_cv`/`student`/
+  `organization` — only `ai_cv` is actively created in this phase; the
+  other two exist in the schema for future use, with no UI), `status`
+  (`pending`/`approved`/`rejected`, default `pending`),
+  `suggested_by_user_id` (nullable), `approved_skill_id` (nullable).
+- **`AiSkillExtractionService::mapToCatalog()` now creates-or-reuses a
+  pending suggestion for any name with no catalog match**, via
+  `SkillSuggestion::firstOrCreate(['normalized_name' => ..., 'status' =>
+  'pending'], ['name' => ..., 'source' => 'ai_cv'])`. Scoping the lookup
+  to `(normalized_name, pending)` means repeated extractions — by the
+  same or a different student — reuse one shared pending row, while a
+  previously-rejected name can still be freshly re-suggested later (it no
+  longer matches the "pending" half of the lookup). The AI never creates
+  a `Skill` directly and never approves its own suggestion. The
+  extract-skills response gained `suggestion_id`/`suggestion_status`
+  alongside the existing per-skill fields.
+- **`Admin\SkillSuggestionController` (new)** —
+  `GET /admin/skill-suggestions` (pending only), `PUT .../approve`, `PUT
+  .../reject`, admin-role-gated like every other Admin route. `approve()`
+  looks up an existing equivalent Skill by normalized name
+  (`Skill::findByNormalizedName()`) before creating a new one — if the
+  baseline seeder or another Admin created an equivalent Skill between
+  suggestion creation and approval, the suggestion links to that Skill
+  instead of creating a duplicate (a `QueryException` catch-and-relookup
+  fallback around the `Skill::create()` call closes the same race even if
+  it happens between the lookup and the insert). `reject()` never creates
+  a Skill. Both actions return a controlled `409` if the suggestion was
+  already reviewed, rather than silently double-processing it.
+- **`cv_skill_evidence` table / `CvSkillEvidence` model (new)** — the
+  anti-spoofing evidence record backing `source = cv_ai`:
+  `(student_id, cv_id, skill_id)`, `unique(['cv_id', 'skill_id'])`,
+  `cascadeOnDelete()` on `cv_id` (so deleting a CV safely removes the
+  evidence it produced, with no explicit cleanup code needed). Written
+  idempotently (`firstOrCreate`) inside `mapToCatalog()` every time a
+  suggested name resolves to a real catalog Skill — this is the smallest
+  new table that lets the backend verify, across requests, that this
+  exact student's own CV genuinely produced this exact skill through the
+  AI extraction flow, per this phase's own "smallest necessary evidence
+  record" instruction.
+- **`student_skills.source` (new column, enum `manual`/`cv_ai`, default
+  `manual`)** — every pre-existing row is therefore automatically and
+  correctly classified as `manual` with no backfill migration needed.
+  `StudentSkillController::store()` reads `source` from the request
+  (default `manual`); when `source = cv_ai`, it requires `cv_id` and
+  verifies a matching `CvSkillEvidence` row
+  (`cv_id` + `skill_id` + `student_id` — a single indexed lookup, no
+  join) before ever storing the row, returning a `422` otherwise. The
+  ordinary manual-add path is byte-for-byte unchanged and needs no
+  evidence at all. `StudentSkill` uniqueness (`student_id` + `skill_id`)
+  is unaffected by `source`.
+- **Evidence labels, never "Verified":** `manual` → "Self-declared",
+  `cv_ai` → "CV-supported". "CV-supported" means the skill name was found
+  in this student's own CV text and identified through the AI extraction
+  flow — it does not confirm proficiency, and the product never claims
+  otherwise. Organization-facing Application responses now eager-load
+  `studentProfile.studentSkills.skill` so each skill's evidence label is
+  available without exposing `parsed_text`, AI request/response, or
+  confidence.
+- **`MatchingService` is untouched.** It never reads the `source` column;
+  a `manual` and a `cv_ai` `StudentSkill` with identical `skill_id`/
+  `years_of_experience` produce an identical `match_score`. Evidence-
+  aware scoring is explicitly out of scope for this phase.
+- **Flutter**: `StudentSkillModel` (new, `lib/models/`) carries `source`
+  and exposes `isCvSupported`/`evidenceLabel`. `SkillSuggestionModel`
+  (new) backs the Admin suggestion list. `StudentSkillsScreen` (new,
+  read-only "My Skills" list, routed at `/student/cvs/skills` — nested
+  under the existing `/student/cvs` prefix specifically so it's covered
+  by `AppRouter`'s existing role/profile-completion redirect gating with
+  no new gating code) and `StudentSkillProvider` (new) show each skill
+  with its evidence label. `AdminSkillSuggestionsRepository`/
+  `AdminSkillSuggestionsProvider` (new) back a "Pending Skill
+  Suggestions" section added to the existing `AdminSkillsScreen` (list,
+  Approve, Reject — no redesign). `StudentCvScreen`'s AI suggestion sheet
+  now shows "Pending catalog approval" instead of "Not in skill catalog"
+  for an unmatched suggestion, and disables selecting it exactly as
+  before. `OrganizationApplicationDetailsScreen` gained a compact
+  "Skills" card showing each applicant skill's evidence label.
+  `StudentCvProvider.addSelectedSkills()` always claims `source: 'cv_ai'`
+  with the just-analyzed CV's id as evidence — never a client-editable,
+  spoofable value.
+- **Tested via** `tests/Feature/Admin/BaselineSkillSeederTest.php` (new),
+  `tests/Feature/Admin/SkillSuggestionManagementTest.php` (new),
+  extensions to `tests/Feature/AI/AiSkillExtractionServiceTest.php` and
+  `tests/Feature/AI/CvSkillExtractionEndpointTest.php`,
+  `tests/Feature/Student/StudentSkillEvidenceTest.php` (new), and
+  `tests/Feature/Organization/ApplicationSkillEvidenceTest.php` (new) —
+  covering seeder idempotency/dedup, suggestion creation/reuse/dedup,
+  Admin approve/reject including the duplicate-Skill race and the
+  already-reviewed `409`, evidence-backed and spoofed `cv_ai` claims
+  (including another student's CV/evidence and a deleted-CV cascade),
+  `StudentSkill` uniqueness independent of `source`, an unchanged
+  `match_score` across `source` values, and Organization response shape
+  (evidence present, `parsed_text`/confidence/suggestion data absent).
+
+## Student Education Verification Foundation (Phase 8B-1)
+
+A minimal, Admin-reviewed trust signal: a Student uploads an education
+proof document, an Admin approves or rejects it, and an Organization sees
+only the resulting status next to an applicant. "Verified" means an Admin
+reviewed and approved the document — never a direct university/government/
+cryptographic check (see docs/BUSINESS_RULES.md section 9b). Account
+registration and Applying are both completely unaffected by this phase.
+
+- **`education_verifications` table / `EducationVerification` model
+  (new)** — one row per student (`student_id` unique, referencing
+  `student_profiles.id`, the same FK-naming convention as `cvs`/
+  `student_skills`/`cv_skill_evidence`): `institution_name`,
+  `degree_or_program`, `document_path`, `status` (enum
+  `pending`/`verified`/`rejected` — `not_submitted` is never a stored
+  value, only the computed default when no row exists),
+  `rejection_reason`, `submitted_at`, `reviewed_at`,
+  `reviewed_by_admin_id`. A rejected submission is resubmitted by
+  updating this same row, not creating a new one — the smallest
+  architecture consistent with "one active/latest verification per
+  student" being sufficient for v1.
+- **`document_path` is hidden at the model level (`$hidden`),
+  mirroring `CV::$hidden` for `parsed_text`.** Nobody — Student, Admin,
+  or Organization — ever needs the raw filesystem path in a JSON
+  response; a document is only ever reached through one of the two
+  dedicated, ownership-checked streaming endpoints below.
+- **Storage mirrors CV upload exactly**: private `local` disk (never the
+  public web root), `education-verifications/{student_id}/{uuid}.pdf`,
+  server-generated filename (the client's original filename never
+  influences the stored path), max 5 MB, PDF only (`mimes:pdf`, real
+  content inspected, not just the extension).
+- **`Student\EducationVerificationController`** — `store()` (create or
+  resubmit), `show()` (own current state, `not_submitted` as a controlled
+  200 rather than a 404 when nothing exists yet), `document()` (stream
+  the student's own PDF; deliberately no `{id}` in the route at all,
+  since a student only ever has one verification reached through their
+  own profile — there is no ID a student could manipulate to reach
+  someone else's document). `store()`'s "is the current verification
+  already `verified`" check and `show()`/`document()`'s lookup all use a
+  **fresh query** (`$studentProfile->educationVerification()->first()`),
+  not Eloquent's cached `educationVerification` relation property — the
+  cached property would silently return stale data if this student's
+  profile object were reused across multiple actions (e.g. within one
+  request-handling context, or as this project's own test suite
+  discovered when two `post()`/`get()` calls in one test method shared
+  the same `Sanctum::actingAs()` user object). This is a freshness-
+  critical business check (blocking replacement of a verified document),
+  so it can never rely on a cache that might not reflect a concurrent or
+  externally-made change.
+- **File cleanup mirrors `CVController::store()`'s exact pattern**: the
+  new file is always stored and the DB row safely created/updated
+  *before* anything else happens; if the DB write then fails, the
+  just-stored file is deleted so it never becomes an orphan; on a
+  successful resubmission, the *previous* managed file is deleted only
+  afterward, and only if its path was actually generated by this
+  application under this student's own folder (never an arbitrary/legacy
+  path).
+- **`Admin\EducationVerificationController`** — `index()` (every
+  submission, pending first then oldest-submitted-first within each
+  group, with `studentProfile.user` eager-loaded so an Admin never has to
+  cross-reference a bare student id), `show()`, `document()`
+  (Admin-only, no ownership check needed beyond the existing
+  `role:admin` gate — any Admin may review any submission), `verify()`
+  and `reject()`. Mirrors `Admin\SkillSuggestionController`'s exact
+  review-workflow shape: an already-reviewed submission (`status !==
+  'pending'`) always returns a controlled `409` from either action —
+  never a silent overwrite of a prior Admin decision. `reject()` requires
+  a non-empty `rejection_reason` (`RejectEducationVerificationRequest`).
+- **Organization visibility is a single derived, status-only field —
+  architecturally impossible to leak more.** `StudentProfile` gained an
+  `educationVerification(): HasOne` relation plus an **appended**
+  accessor, `education_verification_status`
+  (`getEducationVerificationStatusAttribute()`), computed from that
+  relation and defaulting to `'not_submitted'`. The raw relation itself
+  is hidden (`protected $hidden = ['educationVerification']` — note this
+  must be the relation's camelCase method name, not its snake_case
+  output key: Eloquent's relation-hiding filters `$this->relations` by
+  the original loaded-relation array key *before* the snake_case rename
+  happens during serialization, unlike a normal hidden column). Because
+  the raw relation can never be serialized, `rejection_reason`,
+  `reviewed_by_admin_id`, and `document_path` are structurally
+  unreachable from any response that includes a `StudentProfile` —
+  including every Organization-facing Application response, which now
+  eager-loads `studentProfile.educationVerification` (for the accessor's
+  benefit, avoiding N+1) at all four of `Organization\ApplicationController`'s
+  response sites (`index`, `indexForOpportunity`, `show`,
+  `updateStatus`'s `fresh()`).
+- **`MatchingService` is untouched.** Nothing about education verification
+  is read by, written to, or influences `match_score` in any way.
+- **No Apply gating in this phase.** `Student\ApplicationController::store()`
+  is completely unmodified — education verification is introduced purely
+  as an Organization-visible trust signal, not an eligibility check. See
+  docs/BUSINESS_RULES.md section 9b for the explicit reasoning.
+- **Flutter**: `EducationVerificationModel` (new, `lib/models/`) carries
+  the Student-facing fields (`institutionName`, `degreeOrProgram`,
+  `status`, `rejectionReason`, `submittedAt`, `reviewedAt`) plus
+  `isNotSubmitted`/`isPending`/`isVerified`/`isRejected` helpers.
+  `EducationVerificationRepository` (new, `lib/features/education_verification/data/`)
+  reuses the exact multipart-upload pattern already established by
+  `CvRepository.createCv()` (`FormData`/`MultipartFile`, `PickedCvFile`
+  reused as-is for the picked PDF) for `submit()`, plus `getStatus()` and
+  `downloadDocument()`. `StudentEducationVerificationProvider` (new)
+  mirrors `StudentCvProvider`'s state shape (`isLoading`/`errorMessage`
+  for the read, `isSubmitting`/`formErrorMessage` for the write).
+  `StudentEducationVerificationScreen` (new, routed at
+  `/student/education-verification`, reached from a new "Education
+  Verification" entry on `StudentHomeScreen`) renders one of four states
+  (not-submitted form / pending / verified / rejected-with-resubmit)
+  entirely from `status`, reusing `AppTextField`/`SecondaryButton`/
+  `PrimaryButton`/`StatusChip` — no new design system. `AdminEducationVerificationsRepository`/
+  `AdminEducationVerificationsProvider`/a new Admin screen section follow
+  the exact pattern already established by `AdminSkillSuggestionsRepository`/
+  `AdminSkillSuggestionsProvider`/`AdminSkillsScreen`'s pending-suggestions
+  section (list, per-row busy state, Approve/Reject — Reject here opens a
+  small reason-entry dialog first, since a reason is required).
+  `OrganizationApplicationDetailsScreen` gained one more compact status
+  row next to the existing Applicant/Skills information, driven entirely
+  by `ApplicantSummaryModel.educationVerificationStatus` — no document
+  access, no rejection reason, from the Organization side.
+- **Tested via** `tests/Feature/Student/StudentEducationVerificationTest.php`,
+  `tests/Feature/Admin/EducationVerificationManagementTest.php`, and
+  `tests/Feature/Organization/ApplicationEducationVerificationTest.php`
+  (all new) — covering submission/validation, the spoofing-proof review
+  fields, own-state/own-document access (including the discovered
+  relation-caching staleness bug, now covered by
+  `test_a_verified_verification_cannot_be_resubmitted` and the
+  resubmission tests), resubmission-replaces-file and
+  verified-blocks-resubmission, Admin list ordering/identity/document/
+  verify/reject/already-reviewed-409/no-silent-overwrite, and
+  Organization status-only visibility across all four states with
+  explicit no-leak assertions for the document path, rejection reason,
+  and reviewer id.
+
+## Forgot Password + Reset Password + Email Verification (Phase 8B-2)
+
+A production-style password-recovery flow, plus an audit-driven minimal
+email-verification implementation — both built entirely on Laravel's own
+framework infrastructure. No parallel auth system, no custom token code,
+no second email subsystem.
+
+**Audit findings before implementing anything:** `App\Models\User` already
+extends `Illuminate\Foundation\Auth\User`, which unconditionally uses both
+`Illuminate\Auth\Passwords\CanResetPassword` and `Illuminate\Auth\MustVerifyEmail`
+as traits (confirmed directly from the installed framework source) — so
+every method these two capabilities need
+(`getEmailForPasswordReset()`/`sendPasswordResetNotification()`,
+`hasVerifiedEmail()`/`markEmailAsVerified()`/`getEmailForVerification()`)
+already existed before this phase, just unused. `config/auth.php`'s
+`passwords` broker config, the `password_reset_tokens` table, and the
+`users.email_verified_at` column were all already fully in place from the
+original scaffolding. Nothing needed migrating — this phase is almost
+entirely wiring, not schema.
+
+### Password Reset
+
+- **`Password::sendResetLink()` / `Password::reset()`** (Laravel's own
+  password broker) do the actual work — token generation, hashing,
+  storage, the 60-minute expiry, and the 60-second per-email throttle are
+  all untouched framework behavior (`config/auth.php`). `AuthController`
+  gained two thin methods, `forgotPassword()`/`resetPassword()`, that
+  call the broker and translate its result into this project's
+  `{success, message, data}` response shape — no token logic of any kind
+  lives in application code.
+- **`App\Notifications\ResetPasswordNotification`** — a ~15-line subclass
+  of `Illuminate\Auth\Notifications\ResetPassword` adding only
+  `ShouldQueue` (`onQueue('emails')`, matching every other outbound email
+  in this project — see `App\Mail\QueuedTransactionalMail`). Everything
+  else (mail copy, reset-URL building) is inherited unchanged.
+  `User::sendPasswordResetNotification($token)` is overridden to dispatch
+  this subclass instead of the framework's unqueued default.
+- **The reset link is re-pointed at Flutter Web, not a Laravel page**, via
+  `ResetPassword::createUrlUsing()` registered once in
+  `AppServiceProvider::boot()` — the *only* customization to Laravel's
+  reset-URL generation. Builds
+  `{FRONTEND_URL}/reset-password?token=...&email=...` from
+  `config('app.frontend_url')`, the same env var (and the same
+  `rtrim(..., '/')` pattern) `EmailService` already uses for every other
+  workflow email's CTA link — no hardcoded host anywhere.
+- **`resetPassword()` assigns the plain password and lets `User`'s own
+  `'password' => 'hashed'` cast do the hashing** — the exact same pattern
+  registration already uses; `Hash::make()` is never called explicitly,
+  avoiding any risk of double-hashing.
+- **Every existing Sanctum personal access token for the user is deleted
+  on a successful reset** (`$user->tokens()->delete()`) — the explicit
+  security decision from docs/BUSINESS_RULES.md section 1a. A failed
+  attempt (wrong/expired/reused token) never touches any token.
+- **`ForgotPasswordRequest`/`ResetPasswordRequest`** — thin `FormRequest`s
+  mirroring `RegisterStudentRequest`'s own validation shape (`email`
+  required|email; `password` required|min:8|confirmed for reset).
+- **Routes**: `POST /forgot-password`, `POST /reset-password`, both
+  public and role-agnostic (registered alongside `/login`/`/register/*`,
+  not inside any role-scoped group), both `throttle:5,1` — the same
+  convention `/login` already uses.
+
+### Email Verification
+
+- **`User implements \Illuminate\Contracts\Auth\MustVerifyEmail`** (the
+  interface only — the trait providing every method was already
+  inherited, see the audit findings above). This single line is what
+  makes `email_verified_at` mean anything.
+- **`App\Notifications\VerifyEmailNotification`** — the same
+  ~10-line-subclass-for-queuing pattern as `ResetPasswordNotification`,
+  wrapping Laravel's own `Illuminate\Auth\Notifications\VerifyEmail`.
+  `User::sendEmailVerificationNotification()` is overridden to dispatch
+  this subclass. Sent once, right after registration —
+  `AuthController::registerStudent()`/`registerOrganization()` both call
+  it *after* the user (and, for organizations, the transaction creating
+  both the user and its profile) is fully committed, exactly where
+  `$token = $user->createToken(...)` already runs — never from inside
+  `DB::transaction()`'s closure, which would risk a queue worker
+  processing the job before the row it references is visible to other
+  connections.
+- **`App\Http\Controllers\Auth\EmailVerificationController::verify()`**
+  handles the signed link a user clicks from their inbox. Deliberately
+  **not** behind `auth:sanctum` — a browser navigating to an email link
+  carries no Bearer token, so this stateless API can't rely on session
+  auth here the way Laravel's default web-scaffolding verification route
+  does. Instead, the action is authorized entirely by
+  `$request->hasValidSignature()` (Laravel's own signed-URL mechanism,
+  covering every route parameter — including `{id}`) plus a per-user
+  `hash_equals(sha1($user->getEmailForVerification()), $hash)` check. This
+  is exactly as secure as the framework-default `auth`+`signed` combo:
+  tampering with `{id}` to target a different account breaks the
+  signature, so a "wrong user" attempt fails at the same check as a
+  forged/expired link. Always **redirects** (never a JSON error, never a
+  raw Laravel error page) to `{FRONTEND_URL}/email-verified?status=success`
+  or `...?status=invalid` — a safe UI state either way, matching this
+  phase's own "safe UI, not a crash" requirement (the same posture
+  `EducationVerificationController`/`CVController` already take for a
+  missing physical file, applied here to a missing/invalid signature
+  instead).
+- **`resend()`** — authenticated (`auth:sanctum, active`), no body (always
+  the current user), idempotent/safe if already verified (no email sent,
+  still a 200). Throttled `throttle:6,1`.
+- **`User::$appends = ['email_verified']`** — a plain boolean accessor
+  (`hasVerifiedEmail()`) appended to every `User` JSON response, so
+  Flutter never has to parse `email_verified_at`'s nullable timestamp
+  itself. `email_verified_at` was already unhidden before this phase, so
+  this adds no new exposure.
+
+### Gating decision (deliberately not implemented)
+
+**No route uses the `verified` middleware.** Registration and login both
+succeed before verification, exactly as before this phase — Student
+application submission, Organization opportunity creation, and every
+other existing endpoint remain completely unaffected. This was an
+explicit choice (see docs/BUSINESS_RULES.md section 1a): the platform is
+near submission, every one of those flows is already complete and tested,
+and adding a hard verification gate now would risk destabilizing them for
+no corresponding urgent product need. The infrastructure this phase adds
+(`email_verified`, resend, the signed link) is exactly what a future
+phase would need to add gating on top of — nothing here needs to be
+rebuilt to do so later.
+
+### Flutter
+
+- **`AuthRepository`** gained `forgotPassword(email)`,
+  `resetPassword({email, token, password})`, and
+  `resendVerificationEmail()` — same `POST`/error-handling shape as every
+  existing method there. **`UserModel`** gained `emailVerified` (parsed
+  from `email_verified`).
+- **`AuthProvider`** gained independent loading/error/success state for
+  each of the three new actions (`forgotPassword`/`resetPassword`/
+  `resendVerificationEmail`), mirroring the existing `login`/
+  `registerStudent` state shape — duplicate-submit guarded the same way
+  `StudentCvProvider`/`AdminSkillsProvider` guard their own actions.
+- **`ForgotPasswordScreen`** (new) — email field, Send Reset Link button,
+  always shows the same safe success message regardless of backend
+  status, reached from the "Forgot Password?" button already present
+  (but previously a no-op) on `LoginScreen`.
+- **`ResetPasswordScreen`** (new, routed at `/reset-password`) — reads
+  `token`/`email` from the router's query parameters; a missing/malformed
+  parameter shows a safe inline error state rather than crashing. New
+  Password + Confirm Password fields (`min:8`, matching the backend and
+  the existing registration screens' own local validation), Reset
+  Password button. On success, shows a confirmation and a "Go to Login"
+  action — **does not auto-login**, per this phase's explicit
+  instruction.
+- **`AppRoutes.forgotPassword`/`AppRoutes.resetPassword`** — both added to
+  `AppRouter`'s `_publicPaths` (reachable while unauthenticated) and
+  deliberately **not** added to any "authenticated user must leave" redirect
+  set, unlike `/login` — an already-authenticated session must never
+  bounce a user away from a reset link they opened from their inbox.
+- **`EmailVerifiedScreen`** (new, routed at `/email-verified`) — the
+  landing spot the backend's `verify()` redirect targets; reads the
+  `status` query parameter and shows a static success or failure message
+  plus a "Go to Login" action. No signed-link data is ever handled in
+  Flutter itself — the backend has already fully verified (or rejected)
+  the link by the time this screen renders, per this phase's preferred
+  "verify on the signed backend URL, then redirect" architecture.
+- **Email-verification UI** — a small, shared `EmailVerificationBanner`
+  shown on each of `StudentHomeScreen`/`OrganizationHomeScreen`/
+  `AdminHomeScreen` only when `!user.emailVerified`, with a "Resend
+  Verification Email" action. No new account-settings screen.
+
+### Mail configuration / real-SMTP status
+
+`MAIL_MAILER=log` in this project's `.env.example` (unchanged by this
+phase) — no real SMTP is configured. Every test uses `Notification::fake()`;
+no real email was sent or manually verified against a live inbox during
+this phase (see the Final Report's explicit manual-test-plan section for
+exact steps to do so once real SMTP credentials are available).
+`.env.example` needed no new variables — `FRONTEND_URL` already existed
+(Phase 7A-4.1) and is reused as-is for the reset link.
+
+---
+
+## Candidate Search + Invitation-to-Apply (Phase 8B-3)
+
+**Audit finding before any code was written**: neither Candidate Search nor
+an Invitation concept existed anywhere in either repository — no
+migration, model, controller, route, or Flutter file referenced
+"invitation" or "candidate search" (confirmed with a project-wide
+case-insensitive grep). This phase is a from-scratch build of Flow B, not
+a completion of partial work.
+
+**Schema decision — one new table, no changes to `applications`.**
+`invitations` (`opportunity_id`, `student_id`, `status` enum
+`pending`/`accepted`/`declined` default `pending`, `message` nullable,
+timestamps) mirrors `applications`' own `student_id`/`opportunity_id`
+shape exactly — no `organization_id` column, since ownership is always
+derived through `opportunity.organization_id`, the same pattern
+`Application` already uses. `unique(['opportunity_id', 'student_id'])`
+deliberately is **not** scoped to `status`: a Student can only ever have
+one `Invitation` row per Opportunity for its entire lifetime, which
+collapses every duplicate/conflict case (second pending invite, re-invite
+after acceptance, re-invite after decline) into one DB constraint plus a
+`QueryException` catch — the exact same belt-and-suspenders pattern
+`Student\ApplicationController::store()` already uses for its own
+`unique(student_id, opportunity_id)`.
+
+**Candidate Search (`Organization\CandidateController::index()`,
+`GET /organization/candidates`) is deliberately filter/search-only** —
+`StudentProfile::query()` filtered by `whereHas('user', status=active)`
+plus optional `name`/`major`/`university`/`graduation_year`/`skill`
+LIKE/exact matches. Never calls `MatchingService`; an optional
+`opportunity_id` query param (ownership-checked, 404 otherwise) only adds
+two booleans (`already_applied`/`already_invited`) computed from plain
+`exists()`/`pluck()` queries, never a score. Every result is built as an
+explicit, hand-assembled array — never the raw `StudentProfile`/`User`
+models — so a future field added to either model can never leak through
+this endpoint by accident; the safe-field list (name, university, major,
+graduation_year, `education_verification_status`, skills with
+`name`/`source`) is enforced by construction, not by a `$hidden` list
+that has to be kept in sync.
+
+**Invitation creation (`Organization\InvitationController::store()`,
+`POST /organization/invitations`) never creates an `Application` and
+never calls `MatchingService`** — it inserts exactly one `Invitation` row.
+Checks run in this order: opportunity belongs to this organization (404)
+→ opportunity is `open` (422 — a *business-rule* error, not a 404, since
+the organization already owns and can see this Opportunity regardless of
+its state, unlike a Student-facing enumeration-avoidance 404) → target
+Student exists and is active (404, generic message — never reveals
+"suspended" specifically) → not already applied (409, specific message)
+→ insert (409 on the unique-constraint catch, generic message covering
+every remaining duplicate case). A subtle Eloquent gotcha bit this
+controller during implementation: `status` has no PHP-side default (only
+the database schema default `'pending'`), so the in-memory model
+`Invitation::create()` returns doesn't carry it until `->refresh()` is
+called — the same class of "in-memory model doesn't reflect a DB-applied
+column default" issue documented in an earlier phase for `User.status`.
+
+**Accept (`Student\InvitationController::accept()`,
+`PUT /student/invitations/{invitation}/accept`) is the crux design
+decision of this phase.** `applications.cv_id` is a `NOT NULL` foreign
+key and no CV is ever chosen at invitation time — inventing an
+Application here would mean either guessing a CV on the Student's behalf
+or inserting a row that violates the schema's own constraint. Neither is
+acceptable, so accepting **only** flips `Invitation.status` to
+`accepted`. Flutter then routes the Student to the exact same
+`StudentOpportunityDetailsScreen`/Apply-flow Flow A already uses for
+`invitation.opportunityId` (`POST /opportunities/{opportunity}/apply`,
+unchanged), where they pick a CV exactly as a direct applicant would.
+From that single point on, Flow B is indistinguishable from Flow A:
+same controller, same `MatchingService::analyze()` call, same
+organization-facing ranked applicant list (`Organization\ApplicationController`,
+Phase 8A-1 ranking, unchanged), same shortlist/reject/assessment/offer
+workflow. If a Student already applied independently before responding
+to an invitation, accepting still succeeds — it only records consent; no
+second Application is attempted, and none is needed. Decline
+(`PUT /student/invitations/{invitation}/decline`) is symmetric and even
+simpler: flips `status` to `declined`, creates nothing, calculates
+nothing. Both endpoints reject a second response to the same invitation
+(`409`) and use a controlled `404` — never `403` — for another Student's
+invitation, so the response itself never confirms an invitation with that
+ID exists.
+
+**Notifications** reuse the existing, previously-unused `opportunity`
+`notifications.type` enum value (no migration needed) via three new
+`NotificationService` convenience methods —
+`notifyInvitationReceived()` (student-facing, on send),
+`notifyInvitationAccepted()`/`notifyInvitationDeclined()`
+(organization-facing, on response) — following the exact same
+"one service owns this concern" pattern every other workflow event
+already uses. As of Phase 8B-3.1 (below), `notifyInvitationReceived()`
+also queues an email; the accept/decline pair remains in-app only.
+
+---
+
+## Invitation Email Notification (Phase 8B-3.1)
+
+**Reused the existing email architecture end-to-end — no second email
+system was introduced.** `notifyInvitationReceived()` now calls a new
+`EmailService::sendInvitationReceivedEmail()`, which queues a new
+`InvitationReceivedMail extends QueuedTransactionalMail` on the `emails`
+queue, rendered from a new `resources/views/emails/invitation_received.blade.php`
+Markdown mail template — the exact same three-layer shape
+(`NotificationService` convenience method → `EmailService` method →
+`QueuedTransactionalMail` subclass) every other workflow email already
+follows (see "Queued Email Foundation", Phase 7A-4.1). No changes to
+`QUEUE_CONNECTION`, SMTP/mail configuration, or the queue worker command
+— `php artisan queue:work --queue=emails,default --tries=3 --timeout=60`
+still processes this job exactly like every other workflow email.
+
+**Transaction/duplicate safety needed no new code.**
+`Organization\InvitationController::store()` was never wrapped in an
+explicit `DB::transaction()` to begin with (a single `Invitation::create()`
+insert needs no multi-statement atomicity), and `notifyInvitationReceived()`
+is only ever called after that insert succeeds — the pre-existing
+try/catch around the unique-constraint `QueryException` (duplicate
+invitation) and the explicit already-applied/not-open/wrong-owner checks
+already return early, before `notifyInvitationReceived()` is reached, for
+every failure/duplicate case. Combined with `QueuedTransactionalMail`'s
+`ShouldQueueAfterCommit` mechanism (shared by every workflow email), this
+means: a failed or duplicate invitation request queues no email, by
+construction, without any new guard code. `tests/Feature/Notifications/WorkflowEmailTest.php`
+proves this directly, including a dedicated rollback test (calling
+`notifyInvitationReceived()` inside a manually-wrapped `DB::transaction()`
+that then throws) mirroring the equivalent Offer-email rollback proof.
+
+**CTA decision**: links to `{FRONTEND_URL}/student/invitations` — the
+real, already-shipped (Phase 8B-3) Flutter Web route for the student's
+invitation list. There is no single-invitation detail route in this app,
+so — exactly like `notifyQuizPublished()`'s CTA pointing at the Quiz
+route rather than a nonexistent "quiz details" page — this points at the
+list, matching the in-app notification's own `action_url` for the same
+event. No Flutter changes were needed or made.
+
+**No changes to `MatchingService`, `CV`/Skills/Education-Verification
+architecture, or Auth.** The only near-touch was reusing
+`StudentProfile::educationVerification()`/`education_verification_status`
+(already public, already safe — Phase 8B-1) for Candidate Search's
+education-verification display; no new coupling was introduced.
+
+---
+
+## Multi-Major Opportunity Eligibility (Phase 8B-3.2)
+
+**Schema decision: a dedicated join-style table, not a global Major
+catalog.** `opportunity_eligible_majors` (`id`, `opportunity_id` FK
+`cascadeOnDelete`, `major_name`, `normalized_major_name`, timestamps,
+`unique(opportunity_id, normalized_major_name)` as the explicitly-named
+index `opp_eligible_majors_unique` — MySQL's 64-char identifier limit
+rejects the Laravel-default auto-generated name for this column pair, so
+the short name is required, not stylistic) stores each accepted major as
+plain text per Opportunity, deduplicated case/whitespace-insensitively.
+No repo-wide Major catalog/lookup table existed before this phase and the
+task scope explicitly excluded introducing one — this stays text-based,
+matching how `field_of_study` already worked, just now one-to-many. The
+legacy single `field_of_study` column on `opportunities` is untouched and
+still fully populated/returned as before; nothing was backfilled into the
+new table.
+
+**`App\Support\MajorNormalizer`** is a byte-for-byte mirror of the
+pre-existing `SkillNameNormalizer` (trim → collapse internal whitespace →
+lowercase), reused rather than reinvented, so the two "normalize a
+free-text catalog-ish string for comparison" concepts in this codebase
+stay consistent.
+
+**`App\Services\OpportunityEligibilityService::isStudentEligible()`** is
+the single implementation of the eligibility rule (rule A/B/C — see
+docs/BUSINESS_RULES.md section 5b) and is injected into and called from
+three controllers — `Organization\CandidateController` (opportunity-scoped
+search filtering), `Organization\InvitationController` (invitation guard),
+and `Student\ApplicationController` (apply guard) — with zero duplicated
+normalization/matching logic in any of them.
+
+**Two Eloquent bugs surfaced and fixed while building this:**
+
+1. **Relation/accessor studly-case collision.** The relation was
+   originally named `Opportunity::eligibleMajors()`, alongside an
+   `$appends`-based `eligible_majors` attribute backed by
+   `getEligibleMajorsAttribute()`. Both `$this->eligibleMajors` (relation
+   access) and the `eligible_majors` attribute mutator lookup studly-case
+   to the same PHP method-resolution key (`EligibleMajors`), so Eloquent's
+   `getAttribute()` routed relation access through the accessor path
+   instead, throwing `ErrorException: Undefined property`. Fixed by
+   renaming the relation to `eligibleMajorRecords()` everywhere
+   (`Opportunity`, `OpportunityEligibilityService`, `CandidateController`,
+   `InvitationController`, `OpportunityController`,
+   `Public\OpportunityController`), keeping the public JSON shape as
+   `eligible_majors` via the accessor only. **Any future relation whose
+   name studly-cases to the same string as an `$appends` attribute on the
+   same model will hit this same failure mode** — give one of the two a
+   different name up front.
+2. **Relation-hiding leak.** Once `eligibleMajorRecords` was eager-loaded
+   for the eligibility checks above, Eloquent auto-serialized the loaded
+   relation (including the internal `normalized_major_name`) into every
+   Opportunity JSON response, alongside the intended `eligible_majors`
+   accessor array. This is the exact same pattern already documented for
+   `StudentProfile.educationVerification` (Phase 8B-1): a loaded relation must
+   be explicitly hidden via `$hidden`, and `$hidden` must reference the
+   relation's camelCase method name (`eligibleMajorRecords`), not the
+   snake_case derived attribute. Fixed with
+   `protected $hidden = ['eligibleMajorRecords'];` on `Opportunity`; caught
+   by a dedicated test (`test_normalized_values_are_never_exposed_in_the_response`)
+   before it could ship.
+
+**One real test regression, found and fixed, not deferred.** Gating
+direct Apply (`Student\ApplicationController::store()`) on eligibility
+broke exactly one pre-existing test —
+`ApplicationAutoMatchingTest::test_a_sparse_profile_with_no_skills_or_major_still_gets_a_real_calculated_score()`
+— which applied, via real HTTP, a no-major student to an Opportunity with
+`field_of_study => 'Computer Science'` (now correctly rejected by rule B).
+A full grep of every `field_of_study`-setting test file and every
+`.../apply` HTTP call site confirmed this was the *only* at-risk test —
+every other `field_of_study`-setting test creates its `Application` via
+direct `Eloquent::create()`, bypassing the controller (and the new guard)
+entirely. Fixed by dropping the `field_of_study` override so the
+Opportunity is unrestricted, which preserves the test's real intent
+(proving `MatchingService` handles a sparse, no-skills-no-major profile)
+without weakening the new eligibility guard.
+
+**Apply-side gating was a deliberate consistency decision, not an
+optional add-on.** Without it, Invitation would reject an ineligible
+Student while the same Student could still walk in through direct Apply —
+defeating the purpose of the guard. Both paths call the one shared
+`OpportunityEligibilityService`.
+
+**Scope confirmation**: no change to `MatchingService`'s scoring formula
+or `match_score`, no AI/embedding-based major matching, no global Major
+catalog, no CV/Skills/Education-Verification/Auth changes, no UI redesign
+beyond the minimal chip-list addition to the existing Opportunity form, no
+retroactive changes to pre-existing Invitations.
+
+---
+
+## Interview Contact Details by Type (Phase Final-QA-1)
+
+**Root gap**: `interviews.meeting_link`/`interviews.location` already
+existed and were already conditionally *required_if* in
+`InteractsWithInterviewRules` for `online`/`onsite` — but no equivalent
+field or requirement existed for `phone`, so a Phone interview could be
+scheduled and shown to a Student with literally no way to know how to
+attend it. This phase closes that one remaining gap and hardens the
+existing conditional requirement rather than redesigning anything.
+
+**Schema decision: reuse, plus one new nullable column.** `meeting_link`
+(online) and `location` (onsite) were reused as-is — no redundant
+columns. Only `interviews.contact_phone` (nullable string) was added
+(`2026_08_20_164118_add_contact_phone_to_interviews_table`), after
+`location`. Nullable at the DB level like its two siblings: only one of
+the three is ever populated for a given interview, and every pre-existing
+row must remain valid with none of them set.
+
+**Validation stays in the one existing shared source.**
+`App\Http\Requests\Organization\Concerns\InteractsWithInterviewRules::interviewCreationRules()`
+already generated both `StoreInterviewRequest` (legacy, unprefixed) and
+`StoreAssessmentRequest` (generic, `interview.*`-prefixed) — this phase
+only added a `contact_phone` rule beside the pre-existing
+`meeting_link`/`location` ones (`required_if:interview_type,phone`,
+`url:http,https` added to `meeting_link`), and refactored
+`UpdateInterviewRequest` to consume the same trait instead of hand-copying
+an equivalent rules array that had silently drifted out of having
+`contact_phone` at all. Three requests, one rule source, exactly as the
+codebase's own existing `AssessmentCreationParityTest` already asserts by
+comparing legacy vs. generic rule arrays directly.
+
+**`App\Support\InterviewContactDetailNormalizer`** is the one place that
+keeps only the type-relevant detail populated at persistence time —
+called from both `AssessmentService::createInterviewAssessment()`
+(create) and `Organization\InterviewController::update()` (full-replace
+update). This was necessary, not just tidy: Laravel's
+`FormRequest::validated()` only ever contains keys that were actually
+present in the request body, so a full-replace `PUT` that switches
+`interview_type` from `phone` to `online` and (correctly) omits the now-
+irrelevant `contact_phone` would otherwise leave the old phone number
+sitting in the database untouched by a plain `$interview->update(...)`.
+The normalizer forces the two non-matching fields to `null` unconditionally,
+closing that gap for every write path at once instead of duplicating a
+type-change check per controller.
+
+**Email/notification plumbing extended, not restructured.** `contact_phone`
+was threaded through the exact same chain every other Interview scheduling
+field already used — `Interview` model → `NotificationService::notifyInterviewScheduled()`/
+`notifyInterviewRescheduled()` → `EmailService::sendInterviewScheduledEmail()`/
+`sendInterviewRescheduledEmail()` → `InterviewScheduledMail`/`InterviewRescheduledMail`
+→ `emails/interview_scheduled.blade.php`/`emails/interview_rescheduled.blade.php`.
+No new Mailable, no new template, no SMTP/queue configuration change — one
+new conditional `@if ($interviewType === 'phone' && $contactPhone)` block
+was added to each of the two existing Blade templates, mirroring the
+`online`/`onsite` blocks already there.
+
+**Flutter: one shared display helper, not three duplicated conditionals.**
+`interviewContactDetailLabel()`/`interviewContactDetailValue()`
+(`assessment_display.dart`) map an `InterviewModel`'s `interview_type` to
+the single relevant label/value pair, reused by both
+`organization_application_details_screen.dart` and
+`student_application_details_screen.dart` — each screen renders exactly
+one attendance-detail row (falling back to `'Not specified'` for a legacy
+interview with no value), instead of the pre-existing pattern of
+conditionally showing `meeting_link`/`location` as two independent,
+possibly-both-empty rows. The Student screen's existing selectable
+`_MeetingLinkRow` widget is kept for the online-with-a-real-link case only
+(useful specifically because a link is copyable); phone/onsite, and a
+missing online link, fall through to the same shared helper as the
+Organization screen.
+
+**Scope confirmation**: no new video-calling/Zoom/Google Meet
+integration, no automatic phone dialing, no maps/geocoding, no calendar
+integration, no `url_launcher` (or any other) dependency added — the
+Meeting Link remains display/copy-only, matching the project's existing
+"no large dependency for this" convention documented on
+`_MeetingLinkRow`'s own doc comment. No change to Candidate Search,
+eligible majors, Invitations, Application eligibility, `MatchingService`,
+`match_score`, Skills, CV AI, Education Verification, Auth, Quiz
+architecture, Offer architecture, SMTP/queue configuration, role
+permissions, or general UI design. No pre-existing Interview rows were
+invalidated or backfilled.
+
+---
+
 ## Development Flow
 
 Database

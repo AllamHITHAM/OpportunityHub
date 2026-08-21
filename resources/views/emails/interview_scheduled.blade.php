@@ -16,6 +16,9 @@ An interview has been scheduled for your application to **{{ $opportunityTitle }
 @if ($interviewType === 'onsite' && $location)
 **Location:** {{ $location }}
 @endif
+@if ($interviewType === 'phone' && $contactPhone)
+**Contact phone:** {{ $contactPhone }}
+@endif
 @if ($interviewerName)
 **Interviewer:** {{ $interviewerName }}
 @endif

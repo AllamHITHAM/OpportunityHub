@@ -18,13 +18,25 @@ use Tests\TestCase;
  * Needs `DatabaseMigrations` (not `RefreshDatabase`) to roll a single
  * migration back and forward within one test.
  *
- * As of Phase 8A-5, `2026_08_18_090000_add_parsed_text_to_cvs_table` now
- * sits on top of this migration, so `--step => 2` is required to reach
- * past it and back to this migration's own effect (dropping
- * `cvs.parsed_text` along the way is harmless for every assertion in this
- * file, which only ever touches `notifications`) — the same fragility
- * `OfferSentStatusMigrationTest`'s own doc comment already flags for
- * itself; recalculate again if a later phase adds another migration on
+ * As of Phase 8B-1, `2026_08_18_090000_add_parsed_text_to_cvs_table`,
+ * `2026_08_18_100000_create_skill_suggestions_table`,
+ * `2026_08_18_100100_add_source_to_student_skills_table`,
+ * `2026_08_18_100200_create_cv_skill_evidence_table`, and
+ * `2026_08_19_100000_create_education_verifications_table` sit on top of
+ * this migration; as of Phase 8B-3, one more
+ * (`2026_08_20_100000_create_invitations_table`) sits on top of those; as
+ * of Phase 8B-3.2, one more
+ * (`2026_08_20_110000_create_opportunity_eligible_majors_table`) sits on
+ * top of that; as of Phase Final-QA-1, one more
+ * (`2026_08_20_164118_add_contact_phone_to_interviews_table`) sits on top
+ * of that, so `--step => 9` is required to reach past all eight and
+ * back to this migration's own effect (dropping `cvs.parsed_text`/
+ * `skill_suggestions`/`student_skills.source`/`cv_skill_evidence`/
+ * `education_verifications`/`invitations`/`opportunity_eligible_majors`/
+ * `interviews.contact_phone` along the way is harmless for every assertion
+ * in this file, which only ever touches `notifications`) —
+ * the same fragility `OfferSentStatusMigrationTest`'s own doc comment already flags
+ * for itself; recalculate again if a later phase adds another migration on
  * top.
  */
 class NotificationTypeMigrationTest extends TestCase
@@ -75,7 +87,7 @@ class NotificationTypeMigrationTest extends TestCase
         $notificationId = $this->seedNotification();
         DB::table('notifications')->where('id', $notificationId)->update(['type' => 'assessment']);
 
-        Artisan::call('migrate:rollback', ['--step' => 2]);
+        Artisan::call('migrate:rollback', ['--step' => 9]);
 
         $this->assertSame(
             'system',
@@ -88,7 +100,7 @@ class NotificationTypeMigrationTest extends TestCase
         $notificationId = $this->seedNotification();
         DB::table('notifications')->where('id', $notificationId)->update(['type' => 'offer']);
 
-        Artisan::call('migrate:rollback', ['--step' => 2]);
+        Artisan::call('migrate:rollback', ['--step' => 9]);
 
         $this->assertSame(
             'system',
@@ -108,7 +120,7 @@ class NotificationTypeMigrationTest extends TestCase
         $opportunityId = $this->seedNotification();
         DB::table('notifications')->where('id', $opportunityId)->update(['type' => 'opportunity']);
 
-        Artisan::call('migrate:rollback', ['--step' => 2]);
+        Artisan::call('migrate:rollback', ['--step' => 9]);
 
         $this->assertSame('system', DB::table('notifications')->where('id', $systemId)->value('type'));
         $this->assertSame('application', DB::table('notifications')->where('id', $applicationId)->value('type'));
@@ -126,7 +138,7 @@ class NotificationTypeMigrationTest extends TestCase
             'message' => 'A very specific message body.',
         ]);
 
-        Artisan::call('migrate:rollback', ['--step' => 2]);
+        Artisan::call('migrate:rollback', ['--step' => 9]);
 
         $row = DB::table('notifications')->where('id', $notificationId)->first();
         $this->assertSame('A Very Specific Title', $row->title);
@@ -138,7 +150,7 @@ class NotificationTypeMigrationTest extends TestCase
     {
         $notificationId = $this->seedNotification();
 
-        Artisan::call('migrate:rollback', ['--step' => 2]);
+        Artisan::call('migrate:rollback', ['--step' => 9]);
         Artisan::call('migrate');
 
         DB::table('notifications')->where('id', $notificationId)->update(['type' => 'assessment']);
@@ -150,7 +162,7 @@ class NotificationTypeMigrationTest extends TestCase
 
     public function test_rollback_removes_assessment_and_offer_from_the_enum(): void
     {
-        Artisan::call('migrate:rollback', ['--step' => 2]);
+        Artisan::call('migrate:rollback', ['--step' => 9]);
 
         $notificationId = $this->seedNotification();
 

@@ -2,10 +2,12 @@
 
 namespace App\Http\Controllers\Student;
 
+use App\Exceptions\AiSkillExtractionException;
 use App\Exceptions\CvTextExtractionException;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Student\StoreCVRequest;
 use App\Models\CV;
+use App\Services\AiSkillExtractionService;
 use App\Services\CvTextExtractor;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -204,6 +206,53 @@ class CVController extends Controller
             'success' => true,
             'message' => 'Default CV updated successfully',
             'data' => $cv->fresh(),
+        ]);
+    }
+
+    /**
+     * Phase 8A-6: AI CV Skill Extraction. Suggestion-only -- returns
+     * transient structured skill suggestions derived from this CV's
+     * already-extracted text (parsed_text, Phase 8A-5). Never mutates the
+     * Student's skills, never touches match_score, and never returns
+     * parsed_text itself. Accepting a suggestion is a separate, explicit
+     * client action against the existing Student Skill endpoint
+     * (StudentSkillController::store) -- this action never writes
+     * anything.
+     */
+    public function extractSkills(CV $cv, Request $request, AiSkillExtractionService $service): JsonResponse
+    {
+        if ($cv->student_id !== $request->user()->studentProfile->id) {
+            return response()->json([
+                'success' => false,
+                'message' => 'CV not found',
+                'data' => null,
+            ], 404);
+        }
+
+        if (trim((string) $cv->parsed_text) === '') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Text could not be extracted from this CV.',
+                'data' => null,
+            ], 422);
+        }
+
+        try {
+            $skills = $service->extractSkills($cv);
+        } catch (AiSkillExtractionException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+                'data' => null,
+            ], 503);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'CV skills extracted successfully',
+            'data' => [
+                'skills' => $skills,
+            ],
         ]);
     }
 }

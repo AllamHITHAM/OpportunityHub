@@ -96,6 +96,7 @@ class InterviewRescheduledMailTest extends TestCase
             interviewType: 'phone',
             meetingLink: null,
             location: null,
+            contactPhone: null,
             interviewerName: null,
             durationMinutes: null,
         );
@@ -103,8 +104,31 @@ class InterviewRescheduledMailTest extends TestCase
         $mail->assertSeeInHtml('View Application');
         $mail->assertDontSeeInHtml('Meeting link');
         $mail->assertDontSeeInHtml('Location');
+        $mail->assertDontSeeInHtml('Contact phone');
         $mail->assertDontSeeInHtml('Interviewer');
         $mail->assertDontSeeInHtml('Duration');
+    }
+
+    public function test_shows_the_contact_phone_for_a_phone_interview(): void
+    {
+        $mail = $this->interviewRescheduledMail(
+            interviewType: 'phone',
+            meetingLink: null,
+            contactPhone: '+1 555-0199',
+        );
+
+        $mail->assertSeeInHtml('+1 555-0199');
+    }
+
+    public function test_does_not_show_a_contact_phone_for_an_online_interview_even_if_one_is_set(): void
+    {
+        $mail = $this->interviewRescheduledMail(
+            interviewType: 'online',
+            meetingLink: 'https://meet.example.com/new-room',
+            contactPhone: '+1 555-0199',
+        );
+
+        $mail->assertDontSeeInHtml('Contact phone');
     }
 
     public function test_includes_the_platform_name_in_the_footer(): void
@@ -155,6 +179,7 @@ class InterviewRescheduledMailTest extends TestCase
         ?int $durationMinutes = 60,
         ?string $meetingLink = 'https://meet.example.com/room',
         ?string $location = null,
+        ?string $contactPhone = null,
         ?string $interviewerName = null,
     ): InterviewRescheduledMail {
         return new InterviewRescheduledMail(
@@ -166,6 +191,7 @@ class InterviewRescheduledMailTest extends TestCase
             durationMinutes: $durationMinutes,
             meetingLink: $meetingLink,
             location: $location,
+            contactPhone: $contactPhone,
             interviewerName: $interviewerName,
         );
     }

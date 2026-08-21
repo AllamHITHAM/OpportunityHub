@@ -31,6 +31,7 @@ class InterviewRescheduledMail extends QueuedTransactionalMail
         public readonly ?int $durationMinutes = null,
         public readonly ?string $meetingLink = null,
         public readonly ?string $location = null,
+        public readonly ?string $contactPhone = null,
         public readonly ?string $interviewerName = null,
     ) {
         parent::__construct();

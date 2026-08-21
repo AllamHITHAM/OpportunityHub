@@ -35,4 +35,16 @@ return [
         ],
     ],
 
+    /*
+    | Phase 8A-6: AI CV Skill Extraction. Groq (OpenAI-compatible Chat
+    | Completions API), called directly over HTTP by
+    | AiSkillExtractionService -- see docs/ARCHITECTURE.md "AI CV Skill
+    | Extraction" for the provider decision. env() is confined to this
+    | file, never called inside the service itself.
+    */
+    'groq' => [
+        'api_key' => env('GROQ_API_KEY'),
+        'model' => env('GROQ_MODEL', 'openai/gpt-oss-120b'),
+    ],
+
 ];

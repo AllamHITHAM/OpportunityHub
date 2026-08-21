@@ -2,12 +2,14 @@
 
 namespace Tests\Unit\Services;
 
+use App\Mail\InterviewScheduledMail;
 use App\Models\Interview;
 use App\Models\Offer;
 use App\Models\Quiz;
 use App\Models\User;
 use App\Services\NotificationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Mail;
 use InvalidArgumentException;
 use Tests\TestCase;
 
@@ -310,6 +312,36 @@ class NotificationServiceTest extends TestCase
         $this->assertSame('interview', $notification->type);
         $this->assertSame('normal', $notification->priority);
         $this->assertSame('/student/applications/5', $notification->action_url);
+    }
+
+    /**
+     * Phase Final-QA-1: `contact_phone` is forwarded to `EmailService` the
+     * exact same way `meeting_link`/`location` already are, so a Phone
+     * interview's email actually carries the number the student needs to
+     * attend.
+     */
+    public function test_notify_interview_scheduled_forwards_the_contact_phone(): void
+    {
+        Mail::fake();
+
+        $studentUser = $this->studentUser();
+        $interview = new Interview([
+            'interview_type' => 'phone',
+            'scheduled_at' => now()->addDays(3),
+            'contact_phone' => '+1 555-0100',
+        ]);
+
+        $this->notifications->notifyInterviewScheduled(
+            $studentUser,
+            'Backend Developer',
+            applicationId: 5,
+            interview: $interview,
+        );
+
+        Mail::assertQueued(
+            InterviewScheduledMail::class,
+            fn (InterviewScheduledMail $mail) => $mail->contactPhone === '+1 555-0100',
+        );
     }
 
     public function test_notify_interview_rescheduled(): void
