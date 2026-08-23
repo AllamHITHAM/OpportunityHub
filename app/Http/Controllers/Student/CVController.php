@@ -6,11 +6,14 @@ use App\Exceptions\AiSkillExtractionException;
 use App\Exceptions\CvTextExtractionException;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Student\StoreCVRequest;
+use App\Http\Requests\Student\UpdateCVRequest;
 use App\Models\CV;
 use App\Services\AiSkillExtractionService;
+use App\Services\CvDocumentClassifierService;
 use App\Services\CvTextExtractor;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -27,6 +30,17 @@ class CVController extends Controller
      * CV download action), never a direct/guessable URL.
      */
     private const DISK = 'local';
+
+    /**
+     * Phase 8A-6.2: below this many characters of trimmed `parsed_text`,
+     * a document is treated as not having enough readable text to be
+     * worth an AI classification/extraction call at all. Deliberately
+     * very low -- this is only a cheap pre-filter for genuinely
+     * near-empty PDFs (e.g. a stray watermark or a single heading); the
+     * real "is this actually a CV" judgment is CvDocumentClassifierService
+     * below, not this length check.
+     */
+    private const MIN_READABLE_TEXT_LENGTH = 20;
 
     public function __construct(private readonly CvTextExtractor $textExtractor)
     {
@@ -114,6 +128,35 @@ class CVController extends Controller
         }
 
         return $text === '' ? null : $text;
+    }
+
+    /**
+     * Phase 8A-6.2: rename only -- the PDF itself is never touched.
+     * `UpdateCVRequest` recognizes only `title`, so nothing else this
+     * request body might contain (`student_id`, `file_path`,
+     * `parsed_text`, `version`, `is_default`, `created_by_ai`) can ever
+     * reach the update. Renaming has no relationship to Delete's "used in
+     * an Application" conflict rule -- a CV referenced by an Application
+     * is identified by `cv_id`, never by its title, so renaming a CV that
+     * already has applications is always safe and always allowed.
+     */
+    public function update(CV $cv, UpdateCVRequest $request): JsonResponse
+    {
+        if ($cv->student_id !== $request->user()->studentProfile->id) {
+            return response()->json([
+                'success' => false,
+                'message' => 'CV not found',
+                'data' => null,
+            ], 404);
+        }
+
+        $cv->update(['title' => $request->validated('title')]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'CV updated successfully',
+            'data' => $cv->fresh(),
+        ]);
     }
 
     /**
@@ -218,9 +261,37 @@ class CVController extends Controller
      * client action against the existing Student Skill endpoint
      * (StudentSkillController::store) -- this action never writes
      * anything.
+     *
+     * Phase 8A-6.2: two validation gates now run before extraction, in
+     * order --
+     *   1. a deterministic readable-text-length check (below
+     *      MIN_READABLE_TEXT_LENGTH is treated as "not enough text to
+     *      analyze", regardless of whether it's literally empty or just
+     *      near-empty);
+     *   2. a bounded AI classification (CvDocumentClassifierService)
+     *      confirming the text actually reads as a CV/resume, so a
+     *      lecture chapter, article, or unrelated PDF that merely
+     *      mentions technical terms can never have skills attributed to
+     *      the student from it.
+     * Neither gate ever reaches AiSkillExtractionService (so no
+     * CvSkillEvidence/SkillSuggestion is ever written) unless both pass. A
+     * classifier-provider failure is a 503 ("temporarily unavailable"),
+     * exactly like an extraction-provider failure -- never reported as
+     * "not a CV".
+     *
+     * Phase 8A-6.3: an atomic per-CV lock (409, "already being analyzed")
+     * guards the entire gate+extraction flow against a concurrent request
+     * for the same CV, and both the classification and extraction HTTP
+     * calls now retry a transient provider outcome with backoff (see
+     * App\Services\Concerns\RetriesTransientAiProviderCalls) instead of
+     * failing on the very first hiccup.
      */
-    public function extractSkills(CV $cv, Request $request, AiSkillExtractionService $service): JsonResponse
-    {
+    public function extractSkills(
+        CV $cv,
+        Request $request,
+        AiSkillExtractionService $service,
+        CvDocumentClassifierService $classifier,
+    ): JsonResponse {
         if ($cv->student_id !== $request->user()->studentProfile->id) {
             return response()->json([
                 'success' => false,
@@ -229,30 +300,72 @@ class CVController extends Controller
             ], 404);
         }
 
-        if (trim((string) $cv->parsed_text) === '') {
+        // Phase 8A-6.3: an atomic, cross-request lock (the `database`
+        // cache store, this app's real configured driver -- safe across
+        // concurrent PHP-FPM workers, unlike an in-memory-only guard) so
+        // the exact same CV can never be analyzed by two overlapping
+        // requests at once (e.g. two browser tabs, or a double-submit
+        // that slipped past the Flutter-side button-disable guard). A
+        // generous TTL covers the worst case of the retry-with-backoff
+        // below (up to 3 attempts x 25s timeout + backoff) so a lock can
+        // never outlive a request that genuinely crashed mid-flight.
+        $lock = Cache::lock("cv-extract-skills:{$cv->id}", 90);
+        if (! $lock->get()) {
             return response()->json([
                 'success' => false,
-                'message' => 'Text could not be extracted from this CV.',
+                'message' => 'This CV is already being analyzed. Please wait for it to finish.',
                 'data' => null,
-            ], 422);
+            ], 409);
         }
 
         try {
-            $skills = $service->extractSkills($cv);
-        } catch (AiSkillExtractionException $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage(),
-                'data' => null,
-            ], 503);
-        }
+            $text = trim((string) $cv->parsed_text);
 
-        return response()->json([
-            'success' => true,
-            'message' => 'CV skills extracted successfully',
-            'data' => [
-                'skills' => $skills,
-            ],
-        ]);
+            if (mb_strlen($text) < self::MIN_READABLE_TEXT_LENGTH) {
+                return response()->json([
+                    'success' => false,
+                    'message' => "We couldn't find enough readable text in this PDF to analyze it.",
+                    'data' => null,
+                ], 422);
+            }
+
+            try {
+                $isCv = $classifier->isCv($text);
+            } catch (AiSkillExtractionException $e) {
+                return response()->json([
+                    'success' => false,
+                    'message' => $e->getMessage(),
+                    'data' => null,
+                ], 503);
+            }
+
+            if (! $isCv) {
+                return response()->json([
+                    'success' => false,
+                    'message' => "This document doesn't appear to be a CV or resume. Upload a CV to use AI Skill Analysis.",
+                    'data' => null,
+                ], 422);
+            }
+
+            try {
+                $skills = $service->extractSkills($cv);
+            } catch (AiSkillExtractionException $e) {
+                return response()->json([
+                    'success' => false,
+                    'message' => $e->getMessage(),
+                    'data' => null,
+                ], 503);
+            }
+
+            return response()->json([
+                'success' => true,
+                'message' => 'CV skills extracted successfully',
+                'data' => [
+                    'skills' => $skills,
+                ],
+            ]);
+        } finally {
+            $lock->release();
+        }
     }
 }

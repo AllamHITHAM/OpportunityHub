@@ -8,10 +8,10 @@ use App\Models\CvSkillEvidence;
 use App\Models\Skill;
 use App\Models\SkillSuggestion;
 use App\Models\StudentSkill;
+use App\Services\Concerns\RetriesTransientAiProviderCalls;
 use App\Support\SkillNameNormalizer;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Throwable;
 
 /**
  * Sends a CV's already-extracted text (CvTextExtractor, Phase 8A-5) to the
@@ -41,12 +41,16 @@ use Throwable;
  */
 class AiSkillExtractionService
 {
+    use RetriesTransientAiProviderCalls;
+
     private const API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
     /**
-     * A single bounded request, no retries -- this runs synchronously
-     * inside an interactive Student action, so a slow/hung provider must
-     * fail fast rather than pile up retry attempts.
+     * Per-attempt timeout. Phase 8A-6.3: a transient provider outcome
+     * (429/408/5xx/connection failure) is now retried with backoff (see
+     * RetriesTransientAiProviderCalls) rather than failing on the very
+     * first hiccup -- still bounded overall (at most 3 attempts), since
+     * this runs synchronously inside an interactive Student action.
      */
     private const TIMEOUT_SECONDS = 25;
 
@@ -85,20 +89,19 @@ class AiSkillExtractionService
 
         $body = $this->requestBody((string) $cv->parsed_text, $model);
 
-        try {
-            $response = Http::withHeaders([
+        // Phase 8A-6.3: transient outcomes (429/408/5xx/connection
+        // failure) are retried with backoff inside sendWithRetry() --
+        // what comes back here is either a genuine success or a
+        // non-retryable failure (e.g. 401).
+        $response = $this->sendWithRetry(
+            fn () => Http::withHeaders([
                 'Authorization' => "Bearer {$apiKey}",
                 'Content-Type' => 'application/json',
             ])
                 ->timeout(self::TIMEOUT_SECONDS)
-                ->post(self::API_URL, $body);
-        } catch (Throwable $e) {
-            Log::error('AI skill extraction failed: request to the AI provider could not be completed.', [
-                'exception' => $e->getMessage(),
-            ]);
-
-            throw new AiSkillExtractionException('AI skill extraction is currently unavailable. Please try again later.');
-        }
+                ->post(self::API_URL, $body),
+            'AI skill extraction failed',
+        );
 
         if ($response->failed()) {
             Log::error('AI skill extraction failed: the AI provider returned an error response.', [

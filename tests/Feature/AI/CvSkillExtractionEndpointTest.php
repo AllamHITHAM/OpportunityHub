@@ -8,6 +8,7 @@ use App\Models\StudentProfile;
 use App\Models\StudentSkill;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Http;
 use Laravel\Sanctum\Sanctum;
@@ -30,6 +31,9 @@ class CvSkillExtractionEndpointTest extends TestCase
 
         Config::set('services.groq.api_key', 'test-api-key');
         Config::set('services.groq.model', 'openai/gpt-oss-120b');
+        // Phase 8A-6.3: real retry backoff is real wall-clock seconds --
+        // tests exercise the retry count/logic, never the real delay.
+        Config::set('services.groq.retry_delays_ms', [0, 0]);
     }
 
     public function test_the_owning_student_can_extract_skills_from_their_own_cv(): void
@@ -126,7 +130,7 @@ class CvSkillExtractionEndpointTest extends TestCase
         $response = $this->postJson("/api/student/cvs/{$cv->id}/extract-skills");
 
         $response->assertStatus(422)
-            ->assertJsonPath('message', 'Text could not be extracted from this CV.');
+            ->assertJsonPath('message', "We couldn't find enough readable text in this PDF to analyze it.");
         Http::assertNothingSent();
     }
 
@@ -139,7 +143,23 @@ class CvSkillExtractionEndpointTest extends TestCase
         $response = $this->postJson("/api/student/cvs/{$cv->id}/extract-skills");
 
         $response->assertStatus(422)
-            ->assertJsonPath('message', 'Text could not be extracted from this CV.');
+            ->assertJsonPath('message', "We couldn't find enough readable text in this PDF to analyze it.");
+        Http::assertNothingSent();
+    }
+
+    public function test_a_cv_with_nonblank_but_insufficient_text_returns_a_controlled_422(): void
+    {
+        // Phase 8A-6.2: short but non-empty text (e.g. a stray watermark
+        // or a single heading picked up from an otherwise-image PDF) is
+        // still rejected before any AI call, same as fully blank text.
+        $student = $this->studentWithProfile();
+        Sanctum::actingAs($student->user);
+        $cv = $this->cvFor($student->profile->id, 'Confidential.');
+
+        $response = $this->postJson("/api/student/cvs/{$cv->id}/extract-skills");
+
+        $response->assertStatus(422)
+            ->assertJsonPath('message', "We couldn't find enough readable text in this PDF to analyze it.");
         Http::assertNothingSent();
     }
 
@@ -257,9 +277,288 @@ class CvSkillExtractionEndpointTest extends TestCase
     }
 
     // -----------------------------------------------------------------
+    // Phase 8A-6.2: CV/resume document-validation gate
+    // -----------------------------------------------------------------
+
+    public function test_a_technical_chapter_is_rejected_as_not_a_cv(): void
+    {
+        $student = $this->studentWithProfile();
+        Sanctum::actingAs($student->user);
+        $cv = $this->cvFor($student->profile->id, <<<'TEXT'
+            Chapter 4: Object-Oriented Programming Fundamentals
+
+            This chapter introduces the core concepts of object-oriented
+            programming using Java and C++. We begin by examining how
+            classes encapsulate data and behavior. A MySQL database is
+            used throughout the accompanying exercises to illustrate
+            persistence. By the end of this chapter, the reader should
+            understand inheritance, polymorphism, and encapsulation.
+            TEXT);
+        $this->fakeClassifierOnly(false);
+
+        $response = $this->postJson("/api/student/cvs/{$cv->id}/extract-skills");
+
+        $response->assertStatus(422)->assertJsonPath(
+            'message',
+            "This document doesn't appear to be a CV or resume. Upload a CV to use AI Skill Analysis.",
+        );
+        Http::assertSentCount(1);
+        $this->assertDatabaseCount('cv_skill_evidence', 0);
+        $this->assertDatabaseCount('skill_suggestions', 0);
+        $this->assertDatabaseCount('student_skills', 0);
+    }
+
+    public function test_lecture_notes_are_rejected_as_not_a_cv(): void
+    {
+        $student = $this->studentWithProfile();
+        Sanctum::actingAs($student->user);
+        $cv = $this->cvFor($student->profile->id, <<<'TEXT'
+            Lecture 9 — Introduction to Relational Databases
+
+            Today we cover normalization, primary and foreign keys, and
+            basic SQL queries. Students should review the MySQL
+            documentation before next week's lab session. Homework:
+            complete exercises 1 through 5 in the course workbook.
+            TEXT);
+        $this->fakeClassifierOnly(false);
+
+        $response = $this->postJson("/api/student/cvs/{$cv->id}/extract-skills");
+
+        $response->assertStatus(422)->assertJsonPath(
+            'message',
+            "This document doesn't appear to be a CV or resume. Upload a CV to use AI Skill Analysis.",
+        );
+        Http::assertSentCount(1);
+        $this->assertDatabaseCount('cv_skill_evidence', 0);
+        $this->assertDatabaseCount('skill_suggestions', 0);
+    }
+
+    public function test_a_research_article_is_rejected_as_not_a_cv(): void
+    {
+        $student = $this->studentWithProfile();
+        Sanctum::actingAs($student->user);
+        $cv = $this->cvFor($student->profile->id, <<<'TEXT'
+            Abstract: This paper presents a comparative analysis of
+            caching strategies in distributed systems built with Flutter
+            and C++. We evaluate throughput and latency across several
+            configurations and conclude that hybrid caching outperforms
+            purely local strategies in high-concurrency scenarios.
+            TEXT);
+        $this->fakeClassifierOnly(false);
+
+        $response = $this->postJson("/api/student/cvs/{$cv->id}/extract-skills");
+
+        $response->assertStatus(422)->assertJsonPath(
+            'message',
+            "This document doesn't appear to be a CV or resume. Upload a CV to use AI Skill Analysis.",
+        );
+        Http::assertSentCount(1);
+    }
+
+    public function test_a_normal_cv_passes_classification_and_reaches_extraction(): void
+    {
+        $student = $this->studentWithProfile();
+        Sanctum::actingAs($student->user);
+        $cv = $this->cvFor($student->profile->id, <<<'TEXT'
+            Jane Student
+            jane.student@example.com
+
+            Education
+            BSc Computer Science, State University, 2022–2026
+
+            Experience
+            Backend Intern, Acme Corp, Summer 2025 — built REST APIs in Flutter and MySQL.
+
+            Skills
+            Flutter, MySQL, C++
+            TEXT);
+        $this->fakeGroq(['Flutter' => 0.9, 'MySQL' => 0.85, 'C++' => 0.8]);
+
+        $response = $this->postJson("/api/student/cvs/{$cv->id}/extract-skills");
+
+        $response->assertStatus(200)->assertJsonPath('success', true);
+        Http::assertSentCount(2);
+    }
+
+    public function test_a_sparse_graduate_cv_with_no_work_experience_still_passes(): void
+    {
+        $student = $this->studentWithProfile();
+        Sanctum::actingAs($student->user);
+        $cv = $this->cvFor($student->profile->id, <<<'TEXT'
+            Ahmad Ali
+            Recent Graduate
+
+            Education
+            BSc Civil Engineering, Tech University, 2022–2026
+
+            Projects
+            Final-year project: reinforced concrete design using AutoCAD.
+
+            Skills
+            AutoCAD, Project Management
+            TEXT);
+        $this->fakeGroq(['AutoCAD' => 0.9]);
+
+        $response = $this->postJson("/api/student/cvs/{$cv->id}/extract-skills");
+
+        $response->assertStatus(200)->assertJsonPath('success', true);
+    }
+
+    public function test_classifier_provider_failure_returns_a_temporary_error_not_a_rejection(): void
+    {
+        $student = $this->studentWithProfile();
+        Sanctum::actingAs($student->user);
+        $cv = $this->cvFor($student->profile->id, 'Proficient in AutoCAD and structural design.');
+        Http::fake(['api.groq.com/*' => Http::response(['error' => ['message' => 'down']], 500)]);
+
+        $response = $this->postJson("/api/student/cvs/{$cv->id}/extract-skills");
+
+        $response->assertStatus(503);
+        $this->assertNotSame(
+            "This document doesn't appear to be a CV or resume. Upload a CV to use AI Skill Analysis.",
+            $response->json('message'),
+        );
+        $this->assertDatabaseCount('cv_skill_evidence', 0);
+        $this->assertDatabaseCount('skill_suggestions', 0);
+    }
+
+    public function test_ownership_is_still_checked_before_the_classification_gate(): void
+    {
+        $owner = $this->studentWithProfile();
+        $requester = $this->studentWithProfile();
+        Sanctum::actingAs($requester->user);
+        $cv = $this->cvFor($owner->profile->id, 'Proficient in AutoCAD and structural design, education and experience.');
+        $this->fakeGroq(['AutoCAD' => 0.9]);
+
+        $response = $this->postJson("/api/student/cvs/{$cv->id}/extract-skills");
+
+        $response->assertStatus(404);
+        Http::assertNothingSent();
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 8A-6.3: concurrency lock + end-to-end retry
+    // -----------------------------------------------------------------
+
+    public function test_a_concurrent_analysis_of_the_same_cv_is_rejected_with_a_controlled_409(): void
+    {
+        $student = $this->studentWithProfile();
+        Sanctum::actingAs($student->user);
+        $cv = $this->cvFor(
+            $student->profile->id,
+            'Proficient in AutoCAD and structural design, education and experience.',
+        );
+        $this->fakeGroq(['AutoCAD' => 0.9]);
+
+        // Simulates another in-flight request already analyzing this exact CV.
+        $lock = Cache::lock("cv-extract-skills:{$cv->id}", 90);
+        $this->assertTrue($lock->get());
+
+        $response = $this->postJson("/api/student/cvs/{$cv->id}/extract-skills");
+
+        $response->assertStatus(409)->assertJsonPath(
+            'message',
+            'This CV is already being analyzed. Please wait for it to finish.',
+        );
+        Http::assertNothingSent();
+
+        $lock->release();
+    }
+
+    public function test_the_lock_is_released_after_completion_so_a_later_request_may_proceed(): void
+    {
+        $student = $this->studentWithProfile();
+        Sanctum::actingAs($student->user);
+        $cv = $this->cvFor(
+            $student->profile->id,
+            'Proficient in AutoCAD and structural design, education and experience.',
+        );
+        $classifyResponse = $this->chatCompletionResponse([
+            'is_cv' => true,
+            'document_type' => 'resume',
+            'reason' => 'Contains education and experience sections.',
+        ]);
+        $extractResponse = $this->chatCompletionResponse([
+            'skills' => [['name' => 'AutoCAD', 'confidence' => 0.9]],
+        ]);
+        // One combined sequence covering both requests below (a fresh
+        // classify+extract pair each) -- avoids relying on whether
+        // re-calling Http::fake() mid-test fully resets prior state.
+        Http::fake([
+            'api.groq.com/*' => Http::sequence()
+                ->push($classifyResponse)
+                ->push($extractResponse)
+                ->push($classifyResponse)
+                ->push($extractResponse),
+        ]);
+
+        $this->postJson("/api/student/cvs/{$cv->id}/extract-skills")->assertStatus(200);
+
+        // The lock was released after the first request finished -- a
+        // second, later request for the same CV is never blocked.
+        $this->postJson("/api/student/cvs/{$cv->id}/extract-skills")->assertStatus(200);
+    }
+
+    public function test_a_different_cvs_lock_does_not_block_this_one(): void
+    {
+        $student = $this->studentWithProfile();
+        Sanctum::actingAs($student->user);
+        $lockedCv = $this->cvFor(
+            $student->profile->id,
+            'Proficient in AutoCAD and structural design, education and experience.',
+        );
+        $cv = $this->cvFor(
+            $student->profile->id,
+            'Skilled in MySQL, with education and project experience described here.',
+        );
+        $this->fakeGroq(['MySQL' => 0.9]);
+
+        $lock = Cache::lock("cv-extract-skills:{$lockedCv->id}", 90);
+        $this->assertTrue($lock->get());
+
+        $response = $this->postJson("/api/student/cvs/{$cv->id}/extract-skills");
+
+        $response->assertStatus(200);
+        $lock->release();
+    }
+
+    public function test_a_transient_failure_partway_through_is_retried_then_succeeds_end_to_end(): void
+    {
+        $student = $this->studentWithProfile();
+        Sanctum::actingAs($student->user);
+        $cv = $this->cvFor(
+            $student->profile->id,
+            'Proficient in AutoCAD and structural design, education and experience.',
+        );
+        Http::fake([
+            'api.groq.com/*' => Http::sequence()
+                // classification succeeds on the first attempt...
+                ->push($this->chatCompletionResponse([
+                    'is_cv' => true,
+                    'document_type' => 'resume',
+                    'reason' => 'Contains education and experience sections.',
+                ]))
+                // ...extraction fails once transiently...
+                ->push(['error' => ['message' => 'down']], 500)
+                // ...then succeeds on retry.
+                ->push($this->chatCompletionResponse(['skills' => [['name' => 'AutoCAD', 'confidence' => 0.9]]])),
+        ]);
+
+        $response = $this->postJson("/api/student/cvs/{$cv->id}/extract-skills");
+
+        $response->assertStatus(200)->assertJsonPath('data.skills.0.name', 'AutoCAD');
+        Http::assertSentCount(3);
+    }
+
+    // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
 
+    /**
+     * Fakes a passing classification followed by the given extraction
+     * result — the real request-order the controller now makes (Phase
+     * 8A-6.2: classify, then extract).
+     */
     private function fakeGroq(array $skillsWithConfidence): void
     {
         $skills = [];
@@ -267,21 +566,48 @@ class CvSkillExtractionEndpointTest extends TestCase
             $skills[] = ['name' => $name, 'confidence' => $confidence];
         }
 
+        $this->fakeGroqRaw(['skills' => $skills]);
+    }
+
+    private function fakeGroqRaw(array $decodedSkillsPayload): void
+    {
         Http::fake([
-            'api.groq.com/*' => Http::response([
-                'id' => 'chatcmpl-test',
-                'choices' => [
-                    [
-                        'index' => 0,
-                        'message' => [
-                            'role' => 'assistant',
-                            'content' => json_encode(['skills' => $skills]),
-                        ],
-                        'finish_reason' => 'stop',
-                    ],
-                ],
-            ], 200),
+            'api.groq.com/*' => Http::sequence()
+                ->push($this->chatCompletionResponse([
+                    'is_cv' => true,
+                    'document_type' => 'resume',
+                    'reason' => 'Contains education and experience sections.',
+                ]))
+                ->push($this->chatCompletionResponse($decodedSkillsPayload)),
         ]);
+    }
+
+    private function fakeClassifierOnly(bool $isCv): void
+    {
+        Http::fake([
+            'api.groq.com/*' => Http::response($this->chatCompletionResponse([
+                'is_cv' => $isCv,
+                'document_type' => $isCv ? 'resume' : 'other',
+                'reason' => $isCv ? 'Contains education and experience sections.' : 'Reads as instructional text, not a personal history.',
+            ]), 200),
+        ]);
+    }
+
+    private function chatCompletionResponse(array $decodedPayload): array
+    {
+        return [
+            'id' => 'chatcmpl-test',
+            'choices' => [
+                [
+                    'index' => 0,
+                    'message' => [
+                        'role' => 'assistant',
+                        'content' => json_encode($decodedPayload),
+                    ],
+                    'finish_reason' => 'stop',
+                ],
+            ],
+        ];
     }
 
     private function cvFor(int $studentId, ?string $parsedText): CV

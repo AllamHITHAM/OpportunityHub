@@ -45,6 +45,14 @@ return [
     'groq' => [
         'api_key' => env('GROQ_API_KEY'),
         'model' => env('GROQ_MODEL', 'openai/gpt-oss-120b'),
+
+        // Phase 8A-6.3: backoff between retry attempts for a transient
+        // provider outcome only (429, 408, or a 5xx response, or a
+        // connection-level failure) -- see
+        // App\Services\Concerns\RetriesTransientAiProviderCalls. Tests
+        // override this to [0, 0] so retry logic is exercised without
+        // real wall-clock delay.
+        'retry_delays_ms' => [2000, 4000],
     ],
 
 ];

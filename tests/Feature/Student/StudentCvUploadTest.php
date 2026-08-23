@@ -249,6 +249,34 @@ class StudentCvUploadTest extends TestCase
         $this->assertStringStartsWith('application/pdf', $response->headers->get('Content-Type'));
     }
 
+    /**
+     * Phase 8A-6.3: confirms the exact real response shape the Flutter
+     * fix (View/Download CV) relies on — served `inline` (never
+     * `attachment`), with the real CV title (never the server-managed
+     * UUID storage filename) as the suggested `.pdf` filename. This is
+     * unchanged, pre-existing backend behavior (Laravel's own
+     * `Storage::response()` default) — this test documents/locks it in,
+     * it does not reflect a behavior change.
+     */
+    public function test_the_download_response_is_served_inline_with_a_meaningful_pdf_filename(): void
+    {
+        Storage::fake('local');
+        $student = $this->studentWithProfile();
+        Sanctum::actingAs($student->user);
+        $this->uploadCv($student, 'Software Engineer CV', 'resume.pdf');
+        $cv = CV::where('student_id', $student->profile->id)->firstOrFail();
+
+        $response = $this->get("/api/student/cvs/{$cv->id}/download");
+
+        $response->assertStatus(200);
+        $disposition = $response->headers->get('Content-Disposition');
+        $this->assertStringStartsWith('inline', $disposition);
+        $this->assertStringContainsString('Software Engineer CV.pdf', $disposition);
+        // The real server-managed storage path (a UUID, never the
+        // title) is never leaked as the suggested filename.
+        $this->assertStringNotContainsString($cv->file_path, $disposition);
+    }
+
     public function test_a_student_cannot_download_another_students_cv(): void
     {
         Storage::fake('local');

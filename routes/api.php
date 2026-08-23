@@ -87,6 +87,7 @@ Route::middleware(['auth:sanctum', 'active', 'role:student'])->group(function ()
 Route::middleware(['auth:sanctum', 'active', 'role:student', 'profile.exists'])->group(function () {
     Route::get('/student/cvs', [CVController::class, 'index']);
     Route::post('/student/cvs', [CVController::class, 'store']);
+    Route::patch('/student/cvs/{cv}', [CVController::class, 'update']);
     Route::get('/student/cvs/{cv}/download', [CVController::class, 'download']);
     Route::delete('/student/cvs/{cv}', [CVController::class, 'destroy']);
     Route::put('/student/cvs/{cv}/default', [CVController::class, 'setDefault']);

@@ -33,6 +33,9 @@ class AiSkillExtractionServiceTest extends TestCase
 
         Config::set('services.groq.api_key', 'test-api-key');
         Config::set('services.groq.model', 'openai/gpt-oss-120b');
+        // Phase 8A-6.3: real retry backoff is real wall-clock seconds --
+        // tests exercise the retry count/logic, never the real delay.
+        Config::set('services.groq.retry_delays_ms', [0, 0]);
     }
 
     public function test_a_successful_structured_response_is_returned(): void
@@ -380,6 +383,21 @@ class AiSkillExtractionServiceTest extends TestCase
         app(AiSkillExtractionService::class)->extractSkills($cv);
     }
 
+    public function test_a_401_is_never_retried_only_one_request_is_sent(): void
+    {
+        $cv = $this->cvWithParsedText('...');
+
+        Http::fake(['api.groq.com/*' => Http::response(['error' => ['message' => 'unauthorized']], 401)]);
+
+        try {
+            app(AiSkillExtractionService::class)->extractSkills($cv);
+        } catch (AiSkillExtractionException) {
+            // expected
+        }
+
+        Http::assertSentCount(1);
+    }
+
     public function test_a_403_from_the_provider_throws(): void
     {
         $cv = $this->cvWithParsedText('...');
@@ -408,6 +426,96 @@ class AiSkillExtractionServiceTest extends TestCase
 
         $this->expectException(AiSkillExtractionException::class);
         app(AiSkillExtractionService::class)->extractSkills($cv);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 8A-6.3: retry-with-backoff for transient provider outcomes
+    // -----------------------------------------------------------------
+
+    public function test_a_429_is_retried_and_succeeds_on_the_second_attempt(): void
+    {
+        $cv = $this->cvWithParsedText('Proficient in AutoCAD.');
+        Http::fake([
+            'api.groq.com/*' => Http::sequence()
+                ->push(['error' => ['message' => 'rate limited']], 429)
+                ->push($this->chatCompletionBody(['skills' => [['name' => 'AutoCAD', 'confidence' => 0.9]]])),
+        ]);
+
+        $skills = app(AiSkillExtractionService::class)->extractSkills($cv);
+
+        $this->assertSame('AutoCAD', $skills[0]['name']);
+        Http::assertSentCount(2);
+    }
+
+    public function test_a_5xx_is_retried_and_succeeds_on_the_third_attempt(): void
+    {
+        $cv = $this->cvWithParsedText('Proficient in AutoCAD.');
+        Http::fake([
+            'api.groq.com/*' => Http::sequence()
+                ->push(['error' => ['message' => 'down']], 502)
+                ->push(['error' => ['message' => 'down']], 503)
+                ->push($this->chatCompletionBody(['skills' => [['name' => 'AutoCAD', 'confidence' => 0.9]]])),
+        ]);
+
+        $skills = app(AiSkillExtractionService::class)->extractSkills($cv);
+
+        $this->assertSame('AutoCAD', $skills[0]['name']);
+        Http::assertSentCount(3);
+    }
+
+    public function test_a_connection_failure_is_retried_and_succeeds(): void
+    {
+        $cv = $this->cvWithParsedText('Proficient in AutoCAD.');
+        $attempt = 0;
+        Http::fake(function () use (&$attempt) {
+            $attempt++;
+            if ($attempt === 1) {
+                throw new ConnectionException('Connection timed out');
+            }
+
+            return Http::response($this->chatCompletionBody(['skills' => [['name' => 'AutoCAD', 'confidence' => 0.9]]]));
+        });
+
+        $skills = app(AiSkillExtractionService::class)->extractSkills($cv);
+
+        $this->assertSame('AutoCAD', $skills[0]['name']);
+    }
+
+    public function test_retries_are_exhausted_after_three_attempts_then_fails_cleanly(): void
+    {
+        $cv = $this->cvWithParsedText('...');
+        Http::fake(['api.groq.com/*' => Http::response(['error' => ['message' => 'rate limited']], 429)]);
+
+        try {
+            app(AiSkillExtractionService::class)->extractSkills($cv);
+            $this->fail('Expected AiSkillExtractionException.');
+        } catch (AiSkillExtractionException $e) {
+            $this->assertSame(
+                'AI skill extraction is currently unavailable. Please try again later.',
+                $e->getMessage(),
+            );
+        }
+
+        Http::assertSentCount(3);
+    }
+
+    public function test_retries_never_create_duplicate_evidence_once_extraction_finally_succeeds(): void
+    {
+        $student = $this->studentWithProfile();
+        $skill = Skill::create(['name' => 'AutoCAD', 'category' => 'design']);
+        $cv = $this->cvWithParsedText('Proficient in AutoCAD.', $student->profile->id);
+        Http::fake([
+            'api.groq.com/*' => Http::sequence()
+                ->push(['error' => ['message' => 'down']], 500)
+                ->push($this->chatCompletionBody(['skills' => [['name' => 'AutoCAD', 'confidence' => 0.9]]])),
+        ]);
+
+        app(AiSkillExtractionService::class)->extractSkills($cv);
+
+        $this->assertSame(
+            1,
+            CvSkillEvidence::where('cv_id', $cv->id)->where('skill_id', $skill->id)->count(),
+        );
     }
 
     public function test_a_connection_failure_throws(): void
@@ -473,20 +581,31 @@ class AiSkillExtractionServiceTest extends TestCase
     private function fakeGroqRaw(array $decodedSkillsPayload): void
     {
         Http::fake([
-            'api.groq.com/*' => Http::response([
-                'id' => 'chatcmpl-test',
-                'choices' => [
-                    [
-                        'index' => 0,
-                        'message' => [
-                            'role' => 'assistant',
-                            'content' => json_encode($decodedSkillsPayload),
-                        ],
-                        'finish_reason' => 'stop',
-                    ],
-                ],
-            ], 200),
+            'api.groq.com/*' => Http::response($this->chatCompletionBody($decodedSkillsPayload), 200),
         ]);
+    }
+
+    /**
+     * The raw chat-completion response body an `Http::sequence()` entry
+     * needs — reused directly (rather than through `fakeGroqRaw`, which
+     * always installs a single fake for the whole test) whenever a test
+     * needs to sequence a failing attempt followed by a real success.
+     */
+    private function chatCompletionBody(array $decodedSkillsPayload): array
+    {
+        return [
+            'id' => 'chatcmpl-test',
+            'choices' => [
+                [
+                    'index' => 0,
+                    'message' => [
+                        'role' => 'assistant',
+                        'content' => json_encode($decodedSkillsPayload),
+                    ],
+                    'finish_reason' => 'stop',
+                ],
+            ],
+        ];
     }
 
     private function cvWithParsedText(string $text, ?int $studentId = null): CV
