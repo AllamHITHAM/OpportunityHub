@@ -355,6 +355,30 @@ class StudentEducationVerificationTest extends TestCase
         Storage::disk('local')->assertExists($fresh->document_path);
     }
 
+    public function test_a_pending_verification_can_also_be_resubmitted(): void
+    {
+        // Unusual but explicitly allowed (docs/BUSINESS_RULES.md section
+        // 9b): store() only blocks a `verified` current status, so a
+        // student can also correct a still-`pending` submission before an
+        // Admin has reviewed it.
+        Storage::fake('local');
+        $student = $this->studentWithProfile();
+        Sanctum::actingAs($student->user);
+        $this->submit($student, 'State University', 'BSc');
+        $verification = EducationVerification::where('student_id', $student->profile->id)->firstOrFail();
+        $this->assertSame('pending', $verification->status);
+        $oldPath = $verification->document_path;
+
+        $response = $this->submit($student, 'State University', 'BSc (corrected)');
+
+        $response->assertStatus(200)->assertJsonPath('data.status', 'pending');
+        $this->assertDatabaseCount('education_verifications', 1);
+        $fresh = $verification->fresh();
+        $this->assertSame('BSc (corrected)', $fresh->degree_or_program);
+        Storage::disk('local')->assertMissing($oldPath);
+        Storage::disk('local')->assertExists($fresh->document_path);
+    }
+
     public function test_a_verified_verification_cannot_be_resubmitted(): void
     {
         Storage::fake('local');

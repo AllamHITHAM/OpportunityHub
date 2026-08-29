@@ -4,6 +4,7 @@ namespace Tests\Feature\Opportunities;
 
 use App\Models\Opportunity;
 use App\Models\OrganizationProfile;
+use App\Models\Skill;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Sanctum\Sanctum;
@@ -82,16 +83,34 @@ class OpportunityEligibleMajorsTest extends TestCase
         $response->assertStatus(422)->assertJsonValidationErrors(['eligible_majors']);
     }
 
-    public function test_eligible_majors_is_optional_on_create(): void
+    public function test_eligible_majors_is_required_on_create(): void
+    {
+        // Opportunity Requirements Integrity Patch: supersedes the
+        // previous Phase 8B-3.2 decision -- every NEW Opportunity must
+        // declare at least one Eligible Major.
+        $org = $this->approvedOrganization();
+        Sanctum::actingAs($org->user);
+
+        $payload = $this->opportunityPayload();
+        unset($payload['eligible_majors']);
+        $response = $this->postJson('/api/organization/opportunities', $payload);
+
+        $response->assertStatus(422)->assertJsonValidationErrors(['eligible_majors']);
+        $this->assertDatabaseCount('opportunities', 0);
+    }
+
+    public function test_eligible_majors_sent_as_an_empty_array_is_rejected_on_create(): void
     {
         $org = $this->approvedOrganization();
         Sanctum::actingAs($org->user);
 
-        $response = $this->postJson('/api/organization/opportunities', $this->opportunityPayload());
+        $response = $this->postJson(
+            '/api/organization/opportunities',
+            $this->opportunityPayload(['eligible_majors' => []]),
+        );
 
-        $response->assertStatus(201);
-        $this->assertSame([], $response->json('data.eligible_majors'));
-        $this->assertDatabaseCount('opportunity_eligible_majors', 0);
+        $response->assertStatus(422)->assertJsonValidationErrors(['eligible_majors']);
+        $this->assertDatabaseCount('opportunities', 0);
     }
 
     public function test_update_syncs_the_majors_set(): void
@@ -115,8 +134,12 @@ class OpportunityEligibleMajorsTest extends TestCase
         $this->assertDatabaseCount('opportunity_eligible_majors', 2);
     }
 
-    public function test_update_with_an_explicit_empty_list_clears_the_majors(): void
+    public function test_update_with_an_explicit_empty_list_is_rejected(): void
     {
+        // Opportunity Requirements Integrity Patch: an Opportunity that
+        // already has at least one Eligible Major can no longer be
+        // cleared down to zero -- `eligible_majors` may be omitted
+        // (leaves the existing set untouched) but never sent empty.
         $org = $this->approvedOrganization();
         $opportunity = $org->profile->opportunities()->create($this->opportunityAttributes());
         $opportunity->eligibleMajorRecords()->create([
@@ -130,9 +153,9 @@ class OpportunityEligibleMajorsTest extends TestCase
             $this->opportunityPayload(['eligible_majors' => []]),
         );
 
-        $response->assertStatus(200);
-        $this->assertSame([], $response->json('data.eligible_majors'));
-        $this->assertDatabaseCount('opportunity_eligible_majors', 0);
+        $response->assertStatus(422)->assertJsonValidationErrors(['eligible_majors']);
+        $this->assertDatabaseCount('opportunity_eligible_majors', 1);
+        $this->assertDatabaseHas('opportunity_eligible_majors', ['major_name' => 'Civil Engineering']);
     }
 
     public function test_update_without_the_key_leaves_existing_majors_untouched(): void
@@ -217,6 +240,14 @@ class OpportunityEligibleMajorsTest extends TestCase
 
     private function opportunityPayload(array $overrides = []): array
     {
-        return array_merge($this->opportunityAttributes(), $overrides);
+        $skillId = Skill::firstOrCreate(['name' => 'PHP'])->id;
+
+        return array_merge($this->opportunityAttributes(), [
+            // Opportunity Requirements Integrity Patch: required to create
+            // through the real endpoint -- most tests in this file are
+            // about `eligible_majors` specifically, so this default keeps
+            // them from also having to think about Skills.
+            'skills' => [['skill_id' => $skillId, 'is_required' => true]],
+        ], $overrides);
     }
 }

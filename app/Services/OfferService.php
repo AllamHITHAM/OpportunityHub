@@ -199,6 +199,23 @@ class OfferService
         });
     }
 
+    /**
+     * **Phase 10A.3**: `$application->assessment` is `Application`'s own
+     * *current/latest* Assessment accessor (`hasOne(...)->latestOfMany()`,
+     * not a plain `hasOne` -- see that model's doc comment), so this
+     * unchanged one-line check already implements the correct multi-
+     * assessment-history eligibility rule without needing to enumerate
+     * `assessments()` itself: a completed Quiz with no follow-up Interview
+     * → its own row is the latest → eligible. A completed Quiz advanced to
+     * a new Interview that's still `scheduled`/`in_progress` → the
+     * Interview is now the latest, and it isn't `completed` → blocked,
+     * exactly as required (an old completed Quiz can never satisfy Offer
+     * eligibility once a newer Assessment exists and hasn't finished).
+     * Interview completed (whether or not a Quiz preceded it) → the
+     * Interview is the latest and is `completed` → eligible. `result` is
+     * still never inspected here, on any Assessment in the chain -- see
+     * this method's own long-standing rule below.
+     */
     private function assertEligibleForOffer(Application $application): void
     {
         if ($application->status !== 'in_assessment') {

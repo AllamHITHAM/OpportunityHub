@@ -12,7 +12,13 @@ class OpportunityController extends Controller
     public function index(IndexPublicOpportunityRequest $request): JsonResponse
     {
         $opportunities = Opportunity::query()
-            ->where('status', 'open')
+            // Final Company Profile Manual-E2E Bug Fix: `openForApplications()`
+            // (status='open' AND deadline not passed), not a bare
+            // `status='open'` check -- an expired Opportunity must stop
+            // appearing here the instant its deadline passes, in real
+            // time, regardless of whether the `opportunities:close-expired`
+            // sweep has already persisted `status='closed'` for it yet.
+            ->openForApplications()
             ->whereHas('organizationProfile', function ($query) {
                 $query->where('approval_status', 'approved');
             })
@@ -42,6 +48,14 @@ class OpportunityController extends Controller
                         ->orWhere('description', 'like', '%'.$keyword.'%');
                 });
             })
+            // Organization Public Profile phase: scopes to one
+            // Organization's own open opportunities for the Company
+            // Profile screen's "Open Opportunities" section -- reuses
+            // this endpoint's existing open+approved filtering rather
+            // than a second, duplicate query.
+            ->when($request->filled('organization_id'), function ($query) use ($request) {
+                $query->where('organization_id', $request->input('organization_id'));
+            })
             ->latest()
             ->paginate($request->integer('per_page', 15));
 
@@ -56,7 +70,11 @@ class OpportunityController extends Controller
     {
         $opportunity->loadMissing(['organizationProfile', 'opportunitySkills.skill', 'eligibleMajorRecords']);
 
-        if ($opportunity->status !== 'open' || $opportunity->organizationProfile?->approval_status !== 'approved') {
+        // Final Company Profile Manual-E2E Bug Fix: `isOpenForApplications()`,
+        // not a bare `status !== 'open'` check -- an expired Opportunity is
+        // treated exactly like an already-`closed` one here, never
+        // independently viewable once its deadline has passed.
+        if (! $opportunity->isOpenForApplications() || $opportunity->organizationProfile?->approval_status !== 'approved') {
             return response()->json([
                 'success' => false,
                 'message' => 'Opportunity not found',

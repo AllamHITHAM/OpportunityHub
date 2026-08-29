@@ -16,6 +16,14 @@ class OrganizationAssessmentTest extends TestCase
 {
     use RefreshDatabase;
 
+    /**
+     * **Phase 10A.3**: `data` is now the full Assessment *history* array
+     * (see `Organization\AssessmentController::showForApplication()`'s own
+     * doc comment) -- a breaking response-shape change from the single
+     * nullable object this endpoint returned before. With exactly one
+     * Assessment, `data` is a one-element array; `test_organization_sees_the_full_assessment_history_for_its_own_application`
+     * below covers the multi-element case.
+     */
     public function test_organization_sees_the_assessment_for_its_own_application(): void
     {
         $org = $this->approvedOrganization();
@@ -29,15 +37,61 @@ class OrganizationAssessmentTest extends TestCase
 
         $response->assertStatus(200)
             ->assertJsonPath('success', true)
-            ->assertJsonPath('data.id', $assessment->id)
-            ->assertJsonPath('data.type', 'interview')
-            ->assertJsonPath('data.application.id', $application->id)
-            ->assertJsonPath('data.application.cv.id', $application->cv_id)
-            ->assertJsonPath('data.application.cv.file_path', 'cvs/my-cv.pdf')
-            ->assertJsonPath('data.interview.id', $assessment->interview->id);
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $assessment->id)
+            ->assertJsonPath('data.0.type', 'interview')
+            ->assertJsonPath('data.0.application.id', $application->id)
+            ->assertJsonPath('data.0.application.cv.id', $application->cv_id)
+            ->assertJsonPath('data.0.application.cv.file_path', 'cvs/my-cv.pdf')
+            ->assertJsonPath('data.0.interview.id', $assessment->interview->id);
     }
 
-    public function test_organization_gets_null_data_for_an_owned_application_with_no_assessment(): void
+    /**
+     * The Phase 10A.3 case the single-element test above can't cover: a
+     * completed Quiz followed by a real "Advance to Interview" Assessment,
+     * both returned, in creation order, in the same `data` array -- neither
+     * overwritten nor collapsed down to just the latest one.
+     */
+    public function test_organization_sees_the_full_assessment_history_for_its_own_application(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+
+        $quiz = $application->assessment()->create([
+            'type' => 'quiz',
+            'status' => 'completed',
+            'result' => 'passed',
+            'completed_at' => now(),
+            'result_released_at' => now(),
+        ]);
+        $application->update(['status' => 'in_assessment']);
+
+        $interview = $application->assessments()->create([
+            'type' => 'interview',
+            'status' => 'scheduled',
+            'result' => null,
+        ]);
+        $interview->interview()->create([
+            'interview_type' => 'phone',
+            'scheduled_at' => now()->addDays(3),
+        ]);
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->getJson("/api/organization/applications/{$application->id}/assessment");
+
+        $response->assertStatus(200)
+            ->assertJsonCount(2, 'data')
+            ->assertJsonPath('data.0.id', $quiz->id)
+            ->assertJsonPath('data.0.type', 'quiz')
+            ->assertJsonPath('data.0.status', 'completed')
+            ->assertJsonPath('data.1.id', $interview->id)
+            ->assertJsonPath('data.1.type', 'interview')
+            ->assertJsonPath('data.1.status', 'scheduled');
+    }
+
+    public function test_organization_gets_an_empty_array_for_an_owned_application_with_no_assessment(): void
     {
         $org = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($org);
@@ -49,7 +103,8 @@ class OrganizationAssessmentTest extends TestCase
 
         $response->assertStatus(200)
             ->assertJsonPath('success', true)
-            ->assertJsonPath('data', null);
+            ->assertJsonPath('message', 'This application has no assessment yet')
+            ->assertJsonPath('data', []);
     }
 
     /**
@@ -74,10 +129,10 @@ class OrganizationAssessmentTest extends TestCase
         $response = $this->getJson("/api/organization/applications/{$application->id}/assessment");
 
         $response->assertStatus(200)
-            ->assertJsonPath('data.interview.interviewer_email', 'jane@hiring.example')
-            ->assertJsonPath('data.interview.rating', 4)
-            ->assertJsonPath('data.interview.company_feedback', 'Strong technical answers.')
-            ->assertJsonPath('data.interview.decision', 'pending');
+            ->assertJsonPath('data.0.interview.interviewer_email', 'jane@hiring.example')
+            ->assertJsonPath('data.0.interview.rating', 4)
+            ->assertJsonPath('data.0.interview.company_feedback', 'Strong technical answers.')
+            ->assertJsonPath('data.0.interview.decision', 'pending');
 
         $showResponse = $this->getJson("/api/organization/assessments/{$assessment->id}");
 

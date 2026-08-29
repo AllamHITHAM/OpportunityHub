@@ -630,10 +630,17 @@ class WorkflowEmailTest extends TestCase
 
         $organizationNotification = Notification::where('user_id', $scenario['org']->user->id)->firstOrFail();
         $this->assertSame('Quiz Completed', $organizationNotification->title);
-        Mail::assertNothingQueued();
+        // The organization-facing "Quiz Completed" event itself still
+        // queues no email. **Phase 10A.4A**: a bare submission no longer
+        // queues a Student-facing email either, even with
+        // `result_release_mode = immediate` -- release now also requires a
+        // ready Organization next-step decision, which doesn't exist yet
+        // at this point. See `test_a_completed_decision_queues_exactly_one_release_email()`
+        // below for the case where one does queue.
+        Mail::assertQueuedCount(0);
     }
 
-    public function test_quiz_result_available_student_notification_queues_no_email(): void
+    public function test_a_completed_decision_queues_exactly_one_release_email(): void
     {
         $scenario = $this->twoQuestionScenario();
         $this->startQuiz($scenario);
@@ -643,12 +650,27 @@ class WorkflowEmailTest extends TestCase
             ['question_id' => $scenario['tf']->id, 'answer' => 'True'],
         ])->assertStatus(200);
 
-        $studentNotification = Notification::where('user_id', $scenario['student']->user->id)->firstOrFail();
-        $this->assertSame('Quiz Result Available', $studentNotification->title);
-        // Two Notifications exist (student + organization, see
-        // WorkflowNotificationTest's own equivalent test), but zero emails
-        // -- neither Quiz Completed nor Quiz Result Available queues one.
-        Mail::assertNothingQueued();
+        Mail::assertQueuedCount(0);
+
+        // **Phase 10A.4A**: the Organization completing a Reject decision
+        // is what actually triggers release now (immediate mode releases
+        // the moment the decision becomes ready) -- see
+        // `QuizResultReleaseService`.
+        Sanctum::actingAs($scenario['org']->user);
+        $this->postJson(
+            "/api/organization/assessments/{$scenario['assessment']->id}/next-action/reject",
+        )->assertStatus(200);
+
+        $studentNotification = Notification::where('user_id', $scenario['student']->user->id)
+            ->where('title', 'Application Update')
+            ->first();
+        $this->assertNotNull($studentNotification);
+        // Exactly one release communication -- the existing rejection
+        // email, never a separate generic "quiz result" email for the same
+        // release (see `QuizResultReleaseService`'s own doc comment on
+        // "one coherent communication").
+        Mail::assertQueuedCount(1);
+        Mail::assertQueued(\App\Mail\ApplicationRejectedMail::class);
     }
 
     // ===================================================================
@@ -770,7 +792,11 @@ class WorkflowEmailTest extends TestCase
     public function test_an_ineligible_student_invitation_queues_no_email(): void
     {
         $org = $this->approvedOrganization();
-        $opportunity = $this->opportunityFor($org, ['field_of_study' => 'Computer Science']);
+        $opportunity = $this->opportunityFor($org);
+        $opportunity->eligibleMajorRecords()->create([
+            'major_name' => 'Computer Science',
+            'normalized_major_name' => 'computer science',
+        ]);
         $student = $this->studentWithProfileAndCv('Fine Arts');
 
         Sanctum::actingAs($org->user);

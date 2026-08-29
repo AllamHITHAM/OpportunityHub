@@ -22,6 +22,7 @@ class StudentProfileTest extends TestCase
             'major' => 'Computer Science',
             'graduation_year' => 2026,
             'bio' => 'A motivated student.',
+            'interested_in' => ['job'],
         ]);
 
         $response->assertStatus(201)
@@ -86,6 +87,7 @@ class StudentProfileTest extends TestCase
 
         $response = $this->postJson('/api/student/profile', [
             'university' => 'Second University',
+            'interested_in' => ['job'],
         ]);
 
         $response->assertStatus(409)

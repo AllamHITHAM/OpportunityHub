@@ -404,6 +404,7 @@ class NotificationServiceTest extends TestCase
             $studentUser,
             'Backend Developer',
             applicationId: 5,
+            passed: true,
         );
 
         $this->assertSame($studentUser->id, $notification->user_id);

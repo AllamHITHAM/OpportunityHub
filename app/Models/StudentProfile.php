@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
@@ -17,10 +18,19 @@ class StudentProfile extends Model
         'graduation_year',
         'bio',
         'profile_image',
+        'current_location_id',
+        'interested_in',
     ];
 
     protected $casts = [
         'graduation_year' => 'integer',
+        // Candidate Opportunity Preferences patch: a JSON array of
+        // canonical Opportunity Type values (`App\Support\OpportunityType`)
+        // -- `null` for a Student who hasn't set one (existing profiles
+        // from before this patch, never backfilled), an empty array is not
+        // a valid persisted state (validation requires min:1 whenever this
+        // is actually set).
+        'interested_in' => 'array',
     ];
 
     /**
@@ -68,6 +78,45 @@ class StudentProfile extends Model
     public function invitations(): HasMany
     {
         return $this->hasMany(Invitation::class, 'student_id');
+    }
+
+    public function conversations(): HasMany
+    {
+        return $this->hasMany(Conversation::class, 'student_id');
+    }
+
+    /**
+     * The Student's own selected set of available/preferred work locations
+     * (Phase O8.2), each a real Location Catalog row -- never free text.
+     * Empty is a completely valid, truthful state (a Student who hasn't
+     * configured this yet), not an error; see
+     * `OpportunityEligibilityService::isLocationEligible()` for how an
+     * empty set is handled for an On-site/Hybrid Opportunity (excluded
+     * from recommendations, never guessed).
+     *
+     * Deliberately distinct from [currentLocation] below -- a Student may
+     * live in one city but be willing to work in several others.
+     */
+    public function availableLocations(): BelongsToMany
+    {
+        return $this->belongsToMany(
+            Location::class,
+            'student_available_locations',
+        );
+    }
+
+    /**
+     * The Student's own current/home location (Student Location Profile
+     * Patch) -- a single canonical Location Catalog reference, optional,
+     * and never consulted by On-site/Hybrid location eligibility (see
+     * [availableLocations] and `OpportunityEligibilityService::isLocationEligible()`
+     * for the field that actually gates recommendations). Purely
+     * informational profile data, distinct from work-location
+     * availability.
+     */
+    public function currentLocation(): BelongsTo
+    {
+        return $this->belongsTo(Location::class, 'current_location_id');
     }
 
     public function educationVerification(): HasOne

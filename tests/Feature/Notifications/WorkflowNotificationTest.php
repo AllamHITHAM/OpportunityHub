@@ -411,8 +411,14 @@ class WorkflowNotificationTest extends TestCase
         $this->assertDatabaseCount('notifications', 1);
     }
 
-    public function test_successful_submit_creates_one_student_and_one_organization_notification(): void
+    public function test_successful_submit_creates_only_the_organization_notification(): void
     {
+        // **Phase 10A.4A**: a bare submission no longer notifies the
+        // Student at all -- release (and therefore
+        // `notifyQuizDecisionInterview()`/the existing Offer/rejection
+        // notifications) requires a ready Organization next-step decision,
+        // which doesn't exist yet at this point. The organization-facing
+        // "Quiz Completed" notification is unaffected.
         $scenario = $this->twoQuestionScenario();
         $this->startQuiz($scenario);
 
@@ -421,20 +427,7 @@ class WorkflowNotificationTest extends TestCase
             ['question_id' => $scenario['tf']->id, 'answer' => 'True'],
         ])->assertStatus(200);
 
-        $this->assertDatabaseCount('notifications', 2);
-
-        $studentNotification = Notification::where('user_id', $scenario['student']->user->id)->firstOrFail();
-        $this->assertSame('Quiz Result Available', $studentNotification->title);
-        $this->assertSame(
-            'Your quiz result for Backend Developer is now available.',
-            $studentNotification->message,
-        );
-        $this->assertSame('assessment', $studentNotification->type);
-        $this->assertSame('normal', $studentNotification->priority);
-        $this->assertSame(
-            "/student/applications/{$scenario['application']->id}",
-            $studentNotification->action_url,
-        );
+        $this->assertDatabaseCount('notifications', 1);
 
         $organizationNotification = Notification::where('user_id', $scenario['org']->user->id)->firstOrFail();
         $this->assertSame('Quiz Completed', $organizationNotification->title);
@@ -448,6 +441,27 @@ class WorkflowNotificationTest extends TestCase
             "/organization/applications/{$scenario['application']->id}",
             $organizationNotification->action_url,
         );
+    }
+
+    public function test_completing_a_reject_decision_notifies_the_student(): void
+    {
+        $scenario = $this->twoQuestionScenario();
+        $this->startQuiz($scenario);
+        $this->submitQuiz($scenario, [
+            ['question_id' => $scenario['mcq']->id, 'answer' => 'Paris'],
+            ['question_id' => $scenario['tf']->id, 'answer' => 'True'],
+        ])->assertStatus(200);
+        $this->assertDatabaseCount('notifications', 1);
+
+        Sanctum::actingAs($scenario['org']->user);
+        $this->postJson(
+            "/api/organization/assessments/{$scenario['assessment']->id}/next-action/reject",
+        )->assertStatus(200);
+
+        $this->assertDatabaseCount('notifications', 2);
+        $studentNotification = Notification::where('user_id', $scenario['student']->user->id)->firstOrFail();
+        $this->assertSame('Application Update', $studentNotification->title);
+        $this->assertSame('application', $studentNotification->type);
     }
 
     public function test_submit_without_start_creates_no_notification(): void
@@ -486,14 +500,14 @@ class WorkflowNotificationTest extends TestCase
             ['question_id' => $scenario['mcq']->id, 'answer' => 'Paris'],
             ['question_id' => $scenario['tf']->id, 'answer' => 'True'],
         ])->assertStatus(200);
-        $this->assertDatabaseCount('notifications', 2);
+        $this->assertDatabaseCount('notifications', 1);
 
         $this->submitQuiz($scenario, [
             ['question_id' => $scenario['mcq']->id, 'answer' => 'Paris'],
             ['question_id' => $scenario['tf']->id, 'answer' => 'True'],
         ])->assertStatus(409);
 
-        $this->assertDatabaseCount('notifications', 2);
+        $this->assertDatabaseCount('notifications', 1);
     }
 
     // ===================================================================

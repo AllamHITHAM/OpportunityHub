@@ -151,7 +151,7 @@ class CandidateSearchTest extends TestCase
         $skill = Skill::create(['name' => 'PHP', 'category' => 'Programming']);
         $student = $this->studentWithProfile([
             'phone' => '555-1234',
-            'bio' => 'A secret bio.',
+            'bio' => 'A public bio.',
             'profile_image' => 'images/secret.png',
         ], name: 'Jane Student');
         $student->studentSkills()->create(['skill_id' => $skill->id, 'level' => 'intermediate', 'source' => 'manual']);
@@ -163,12 +163,36 @@ class CandidateSearchTest extends TestCase
 
         $candidate = $response->json('data.0');
 
+        // Organization Candidate Profile Enrichment: `bio`,
+        // `current_location`, and `available_locations` are now
+        // intentionally exposed (professional profile fields, spec item
+        // 4/6) -- `phone`/`email`/`profile_image` remain absent here since
+        // there is no `opportunity_id` (no Application relationship) in
+        // this general/unscoped Talent Directory search.
         $this->assertSame(
-            ['id', 'name', 'university', 'major', 'graduation_year', 'education_verification_status', 'skills'],
+            ['id', 'name', 'university', 'major', 'graduation_year', 'bio', 'education_verification_status', 'current_location', 'available_locations', 'skills', 'interested_in'],
             array_keys($candidate),
         );
         $this->assertSame('manual', $candidate['skills'][0]['source']);
         $this->assertSame(['name', 'source'], array_keys($candidate['skills'][0]));
+        $this->assertArrayNotHasKey('phone', $candidate);
+        $this->assertArrayNotHasKey('profile_image', $candidate);
+    }
+
+    public function test_interested_in_is_returned_truthfully_including_null_for_a_legacy_profile(): void
+    {
+        $org = $this->approvedOrganization();
+        $this->studentWithProfile(['interested_in' => ['job', 'internship']], name: 'Has Preference');
+        $this->studentWithProfile([], name: 'Legacy Profile');
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->getJson('/api/organization/candidates');
+        $response->assertStatus(200);
+
+        $byName = collect($response->json('data'))->keyBy('name');
+        $this->assertSame(['job', 'internship'], $byName['Has Preference']['interested_in']);
+        $this->assertNull($byName['Legacy Profile']['interested_in']);
     }
 
     public function test_no_parsed_cv_text_or_education_document_path_leaks(): void
@@ -242,6 +266,42 @@ class CandidateSearchTest extends TestCase
         $this->assertFalse($byName['Fresh Student']['already_invited']);
     }
 
+    /**
+     * Organization Candidate Profile Enrichment: `application_id` and
+     * contact info (`phone`/`email`) are gated on a real `Application`
+     * existing for *this* Opportunity -- the same signal already used to
+     * authorize CV downloads (`Organization\ApplicationController::downloadCv()`),
+     * never a new broad-access rule. A candidate with only an Invitation
+     * (no Application) still gets neither.
+     */
+    public function test_opportunity_specific_search_exposes_application_id_and_contact_only_when_applied(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+
+        $applied = $this->studentWithProfile(['phone' => '555-0000'], name: 'Applied Student');
+        $cv = $applied->cvs()->create(['title' => 'CV', 'file_path' => 'cvs/a.pdf']);
+        $application = $opportunity->applications()->create(['student_id' => $applied->id, 'cv_id' => $cv->id]);
+
+        $invited = $this->studentWithProfile(['phone' => '555-1111'], name: 'Invited Student');
+        $opportunity->invitations()->create(['student_id' => $invited->id]);
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->getJson("/api/organization/candidates?opportunity_id={$opportunity->id}");
+        $response->assertStatus(200);
+
+        $byName = collect($response->json('data'))->keyBy('name');
+
+        $this->assertSame($application->id, $byName['Applied Student']['application_id']);
+        $this->assertSame('555-0000', $byName['Applied Student']['phone']);
+        $this->assertSame($applied->user->email, $byName['Applied Student']['email']);
+
+        $this->assertNull($byName['Invited Student']['application_id']);
+        $this->assertArrayNotHasKey('phone', $byName['Invited Student']);
+        $this->assertArrayNotHasKey('email', $byName['Invited Student']);
+    }
+
     // -----------------------------------------------------------------
     // Phase 8B-3.2: opportunity-specific eligibility filtering.
     // -----------------------------------------------------------------
@@ -278,20 +338,22 @@ class CandidateSearchTest extends TestCase
         $response->assertStatus(200)->assertJsonCount(3, 'data');
     }
 
-    public function test_opportunity_specific_search_falls_back_to_legacy_field_of_study(): void
+    public function test_opportunity_specific_search_is_unrestricted_when_only_field_of_study_is_set(): void
     {
+        // Regression test for the real reported bug: field_of_study set,
+        // eligible_majors genuinely empty -- must NOT narrow the search.
+        // field_of_study is descriptive metadata, never an eligibility gate.
         $org = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($org, ['field_of_study' => 'Civil Engineering']);
 
         $this->studentWithProfile(['major' => 'civil engineering'], name: 'Matching Student');
-        $this->studentWithProfile(['major' => 'Fine Arts'], name: 'Ineligible Student');
+        $this->studentWithProfile(['major' => 'Fine Arts'], name: 'Different Major Student');
 
         Sanctum::actingAs($org->user);
 
         $response = $this->getJson("/api/organization/candidates?opportunity_id={$opportunity->id}");
 
-        $response->assertStatus(200)->assertJsonCount(1, 'data');
-        $this->assertSame('Matching Student', $response->json('data.0.name'));
+        $response->assertStatus(200)->assertJsonCount(2, 'data');
     }
 
     public function test_general_search_ignores_opportunity_eligibility(): void

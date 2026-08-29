@@ -147,11 +147,44 @@ class StoreQuizAssessmentTest extends TestCase
         return [
             'pending' => ['pending'],
             'reviewed' => ['reviewed'],
+            'offer_sent' => ['offer_sent'],
             'accepted' => ['accepted'],
             'rejected' => ['rejected'],
             'withdrawn' => ['withdrawn'],
-            'in_assessment' => ['in_assessment'],
+            // `in_assessment` is deliberately absent as of Phase 10A.3 --
+            // see `StoreAssessmentTest::invalidSourceStatuses()`'s own
+            // comment for the full explanation; the quiz-specific version
+            // of that now-allowed case is
+            // test_in_assessment_with_no_active_assessment_is_allowed
+            // below.
         ];
+    }
+
+    /**
+     * The quiz-specific counterpart to
+     * `StoreAssessmentTest::test_in_assessment_with_no_active_assessment_is_allowed()`
+     * -- Phase 10A.3's generic backend capability doesn't restrict what
+     * *type* the follow-up Assessment is, even though the Flutter "Advance
+     * to Interview" UI action specifically only ever creates an Interview.
+     */
+    public function test_in_assessment_with_no_active_assessment_is_allowed(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'in_assessment');
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->postJson(
+            "/api/organization/applications/{$application->id}/assessments",
+            $this->validQuizPayload()
+        );
+
+        $response->assertStatus(201)
+            ->assertJsonPath('success', true);
+
+        $this->assertDatabaseCount('assessments', 1);
+        $this->assertDatabaseCount('quizzes', 1);
     }
 
     #[DataProvider('invalidSourceStatuses')]
@@ -391,6 +424,200 @@ class StoreQuizAssessmentTest extends TestCase
 
         $response->assertStatus(201)
             ->assertJsonPath('data.quiz.instructions', null);
+    }
+
+    // ---- Phase 10A.2: display mode / result release -----------------
+
+    public function test_display_mode_and_result_release_mode_default_when_omitted(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->postJson(
+            "/api/organization/applications/{$application->id}/assessments",
+            $this->validQuizPayload()
+        );
+
+        $response->assertStatus(201)
+            ->assertJsonPath('data.quiz.display_mode', 'all')
+            ->assertJsonPath('data.quiz.questions_per_page', null)
+            ->assertJsonPath('data.quiz.result_release_mode', 'immediate')
+            ->assertJsonPath('data.quiz.result_release_at', null);
+    }
+
+    public function test_paginated_display_mode_persists_questions_per_page(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->postJson("/api/organization/applications/{$application->id}/assessments", [
+            'type' => 'quiz',
+            'quiz' => [
+                'title' => 'Backend Fundamentals',
+                'passing_score' => 70,
+                'display_mode' => 'paginated',
+                'questions_per_page' => 3,
+            ],
+        ]);
+
+        $response->assertStatus(201)
+            ->assertJsonPath('data.quiz.display_mode', 'paginated')
+            ->assertJsonPath('data.quiz.questions_per_page', 3);
+    }
+
+    public function test_paginated_display_mode_without_questions_per_page_is_rejected(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->postJson("/api/organization/applications/{$application->id}/assessments", [
+            'type' => 'quiz',
+            'quiz' => [
+                'title' => 'Backend Fundamentals',
+                'passing_score' => 70,
+                'display_mode' => 'paginated',
+            ],
+        ]);
+
+        $response->assertStatus(422)
+            ->assertJsonValidationErrors(['quiz.questions_per_page']);
+        $this->assertDatabaseCount('quizzes', 0);
+    }
+
+    public function test_single_display_mode_does_not_require_questions_per_page(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->postJson("/api/organization/applications/{$application->id}/assessments", [
+            'type' => 'quiz',
+            'quiz' => [
+                'title' => 'Backend Fundamentals',
+                'passing_score' => 70,
+                'display_mode' => 'single',
+            ],
+        ]);
+
+        $response->assertStatus(201)->assertJsonPath('data.quiz.display_mode', 'single');
+    }
+
+    public function test_an_invalid_display_mode_is_rejected(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->postJson("/api/organization/applications/{$application->id}/assessments", [
+            'type' => 'quiz',
+            'quiz' => [
+                'title' => 'Backend Fundamentals',
+                'passing_score' => 70,
+                'display_mode' => 'grid',
+            ],
+        ]);
+
+        $response->assertStatus(422)->assertJsonValidationErrors(['quiz.display_mode']);
+    }
+
+    public function test_scheduled_result_release_persists_the_release_time(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+        $releaseAt = now()->addWeek();
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->postJson("/api/organization/applications/{$application->id}/assessments", [
+            'type' => 'quiz',
+            'quiz' => [
+                'title' => 'Backend Fundamentals',
+                'passing_score' => 70,
+                'result_release_mode' => 'scheduled',
+                'result_release_at' => $releaseAt->toISOString(),
+            ],
+        ]);
+
+        $response->assertStatus(201)->assertJsonPath('data.quiz.result_release_mode', 'scheduled');
+        $this->assertNotNull($response->json('data.quiz.result_release_at'));
+    }
+
+    public function test_scheduled_result_release_without_a_release_time_is_rejected(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->postJson("/api/organization/applications/{$application->id}/assessments", [
+            'type' => 'quiz',
+            'quiz' => [
+                'title' => 'Backend Fundamentals',
+                'passing_score' => 70,
+                'result_release_mode' => 'scheduled',
+            ],
+        ]);
+
+        $response->assertStatus(422)
+            ->assertJsonValidationErrors(['quiz.result_release_at']);
+        $this->assertDatabaseCount('quizzes', 0);
+    }
+
+    public function test_a_result_release_time_in_the_past_is_rejected(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->postJson("/api/organization/applications/{$application->id}/assessments", [
+            'type' => 'quiz',
+            'quiz' => [
+                'title' => 'Backend Fundamentals',
+                'passing_score' => 70,
+                'result_release_mode' => 'scheduled',
+                'result_release_at' => now()->subDay()->toISOString(),
+            ],
+        ]);
+
+        $response->assertStatus(422)
+            ->assertJsonValidationErrors(['quiz.result_release_at']);
+    }
+
+    public function test_manual_result_release_mode_is_accepted(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'shortlisted');
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->postJson("/api/organization/applications/{$application->id}/assessments", [
+            'type' => 'quiz',
+            'quiz' => [
+                'title' => 'Backend Fundamentals',
+                'passing_score' => 70,
+                'result_release_mode' => 'manual',
+            ],
+        ]);
+
+        $response->assertStatus(201)->assertJsonPath('data.quiz.result_release_mode', 'manual');
     }
 
     public function test_guest_receives_401(): void

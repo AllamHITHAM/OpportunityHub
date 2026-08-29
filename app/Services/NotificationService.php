@@ -2,11 +2,13 @@
 
 namespace App\Services;
 
+use App\Models\Conversation;
 use App\Models\Interview;
 use App\Models\Notification;
 use App\Models\Offer;
 use App\Models\Quiz;
 use App\Models\User;
+use Illuminate\Support\Carbon;
 use InvalidArgumentException;
 
 /**
@@ -38,6 +40,19 @@ use InvalidArgumentException;
  * action it accompanies — acceptable since this is a local DB insert with
  * no external I/O.
  *
+ * **Phase 10A.4A** adds two events: `notifyQuizDecisionInterview()`
+ * (student-facing, queues an email — the one coherent "Assessment
+ * Update — Interview Invitation" message a released "Advance to
+ * Interview" decision sends, replacing what would otherwise be two
+ * separate messages for the same release) and `notifyDecisionRequired()`
+ * (organization-facing, in-app only — a scheduled release time passed
+ * with no ready decision). `notifyQuizResultAvailable()` below is no
+ * longer called from the standard release path as of this phase (every
+ * release now goes through a `next_action`-specific communication
+ * instead — see `QuizResultReleaseService`) but is deliberately left
+ * intact, not deleted, since it remains structurally valid and its own
+ * tests still exercise it directly.
+ *
  * **`EmailService` collaborator (Phase 7A-4.1, extended Phase 7A-4.2).**
  * This class remains the single conceptual "which workflow event happened,
  * who does it concern" boundary — it still owns the in-app Notification's
@@ -46,22 +61,24 @@ use InvalidArgumentException;
  * email, delegating the actual Mailable/transport/after-commit mechanics to
  * `EmailService` (constructor-injected) rather than calling `Mail::` itself
  * — mixing SMTP transport concerns into this class would defeat the point
- * of having a separate `EmailService` at all. **Eight of fourteen events
- * queue an email as of Phase 8B-3.1**: `notifyOfferSent()` (the Phase
+ * of having a separate `EmailService` at all. **Nine of fourteen events
+ * queue an email as of Phase 10A.2**: `notifyOfferSent()` (the Phase
  * 7A-4.1 pilot), `notifyApplicationRejected()`, `notifyInterviewScheduled()`,
  * `notifyInterviewRescheduled()`, `notifyQuizPublished()`,
- * `notifyOfferAccepted()`, `notifyOfferDeclined()`, and
+ * `notifyOfferAccepted()`, `notifyOfferDeclined()`,
  * `notifyInvitationReceived()` (Phase 8B-3.1 — the Student otherwise has
- * no reason to open the app and discover an invitation exists). Six
- * remain in-app only, unchanged and queuing nothing:
- * `notifyApplicationSubmitted()`, `notifyApplicationShortlisted()`,
- * `notifyQuizCompleted()`, `notifyQuizResultAvailable()` — each fires too
- * frequently per-user (Submitted/Completed) or isn't independently
- * actionable (Shortlisted/Result Available) to justify an email — plus
- * `notifyInvitationAccepted()`/`notifyInvitationDeclined()` (Phase 8B-3,
- * organization-facing) — each fires too infrequently per organization to
- * justify one; see docs/BUSINESS_RULES.md section 8 for the full matrix
- * and reasoning.
+ * no reason to open the app and discover an invitation exists), and
+ * `notifyQuizResultAvailable()` (Phase 10A.2 — now fires only at actual
+ * release time, not at submission, so it graduated from "too frequent to
+ * justify an email" to a genuinely meaningful once-per-Assessment event;
+ * see that method's own doc comment). Five remain in-app only, unchanged
+ * and queuing nothing: `notifyApplicationSubmitted()`,
+ * `notifyApplicationShortlisted()`, `notifyQuizCompleted()` — each fires
+ * too frequently per-user or isn't independently actionable to justify an
+ * email — plus `notifyInvitationAccepted()`/`notifyInvitationDeclined()`
+ * (Phase 8B-3, organization-facing) — each fires too infrequently per
+ * organization to justify one; see docs/BUSINESS_RULES.md section 8 for
+ * the full matrix and reasoning.
  * Because every `EmailService::send*Email()` method queues with
  * after-commit semantics (see `QueuedTransactionalMail`), calling one here
  * — still inside the same `DB::transaction()` as the business mutation it
@@ -94,6 +111,7 @@ class NotificationService
         'offer',
         'organization',
         'opportunity',
+        'message',
     ];
 
     /**
@@ -407,17 +425,36 @@ class NotificationService
      *                      carries no new exposure. Never reads question
      *                      data, `correct_answer`, or anything score/
      *                      grading-related.
+     * @param  ?Carbon  $availableAt  Phase 10A.4B addendum — this
+     *                      candidate's own frozen availability window,
+     *                      when `$quiz` is a shared Opportunity template
+     *                      (`AssessmentService::advanceToSharedQuiz()`).
+     *                      `null` for the legacy ad-hoc "just published"
+     *                      case, which has no availability window at all
+     *                      — the message/email stay exactly as they were
+     *                      before this addendum in that case.
+     * @param  ?Carbon  $dueAt  Only meaningful alongside $availableAt.
      */
     public function notifyQuizPublished(
         User $studentUser,
         string $opportunityTitle,
         int $assessmentId,
         Quiz $quiz,
+        ?Carbon $availableAt = null,
+        ?Carbon $dueAt = null,
     ): Notification {
+        $message = $availableAt === null
+            ? "A quiz is now available for your application to {$opportunityTitle}."
+            : "You have been selected to complete a technical assessment for "
+                ."{$opportunityTitle}. Available from "
+                .$availableAt->format('M j, Y g:i A')
+                .($dueAt !== null ? ', deadline '.$dueAt->format('M j, Y g:i A') : '')
+                .'.';
+
         $notification = $this->create(
             $studentUser,
             'Quiz Available',
-            "A quiz is now available for your application to {$opportunityTitle}.",
+            $message,
             type: 'assessment',
             priority: 'normal',
             actionUrl: $this->studentQuizPath($assessmentId),
@@ -429,32 +466,134 @@ class NotificationService
             $assessmentId,
             passingScore: $quiz->passing_score,
             timeLimitMinutes: $quiz->time_limit_minutes,
+            availableAt: $availableAt,
+            dueAt: $dueAt,
         );
 
         return $notification;
     }
 
     /**
-     * Student-facing: the student's own quiz submission has been graded and
-     * a result is available. Distinct from `notifyQuizCompleted()` below,
-     * which is the organization-facing counterpart of the same underlying
-     * event (Phase 7A-2) — kept as two methods rather than one shared call
-     * because the copy/recipient genuinely differ, the same reasoning
+     * Student-facing: a Quiz result has just been *released* to the
+     * Student (Phase 10A.2) — never called at submission time itself; the
+     * single caller is `QuizResultReleaseService::release()`, whether
+     * triggered by immediate release, a manual Organization action, or a
+     * scheduled release job, so this notification (and its email) can
+     * never fire more than once per Assessment and never before the
+     * Organization's configured release moment. Distinct from
+     * `notifyQuizCompleted()` below, which is the organization-facing
+     * counterpart of the *submission* event, not the release event — kept
+     * as two methods rather than one shared call because the copy/
+     * recipient/timing genuinely differ, the same reasoning
      * `notifyOfferAccepted()`/`notifyOfferDeclined()` already follow for
      * their own two-sided events.
+     *
+     * @param  bool  $passed  Drives only the email/notification copy —
+     *                        never implies a recruitment decision. See
+     *                        `QuizResultMail`'s own doc comment on why a
+     *                        failed result never claims rejection.
      */
     public function notifyQuizResultAvailable(
         User $studentUser,
         string $opportunityTitle,
         int $applicationId,
+        bool $passed,
     ): Notification {
-        return $this->create(
+        $notification = $this->create(
             $studentUser,
             'Quiz Result Available',
             "Your quiz result for {$opportunityTitle} is now available.",
             type: 'assessment',
             priority: 'normal',
             actionUrl: $this->studentApplicationPath($applicationId),
+        );
+
+        $this->emails->sendQuizResultEmail(
+            $studentUser,
+            $opportunityTitle,
+            $applicationId,
+            passed: $passed,
+        );
+
+        return $notification;
+    }
+
+    /**
+     * Student-facing: a completed Quiz's "Advance to Interview" decision
+     * has just been *released* (Phase 10A.4A) — the one coherent
+     * notification combining the assessment outcome and the real interview
+     * details, replacing what would otherwise be two separate messages
+     * (`notifyQuizResultAvailable()` + `notifyInterviewScheduled()`) for
+     * the same release. Only ever called from
+     * `QuizResultReleaseService::releaseInterviewDecision()`, so this can
+     * never fire before the Organization's decision is actually released,
+     * and never more than once per Assessment (the same once-only
+     * guarantee `notifyQuizResultAvailable()` already had).
+     *
+     * @param  Interview  $interview  The already-existing, already-scheduled
+     *                                follow-up Interview — read here only to
+     *                                forward its scheduling fields to
+     *                                `EmailService`, the same student-safe
+     *                                subset `notifyInterviewScheduled()`
+     *                                already uses.
+     */
+    public function notifyQuizDecisionInterview(
+        User $studentUser,
+        string $opportunityTitle,
+        int $applicationId,
+        Interview $interview,
+    ): Notification {
+        $notification = $this->create(
+            $studentUser,
+            'Assessment Update',
+            "You have been selected to continue to the interview stage for {$opportunityTitle}.",
+            type: 'assessment',
+            priority: 'high',
+            actionUrl: $this->studentApplicationPath($applicationId),
+        );
+
+        $this->emails->sendAssessmentDecisionInterviewEmail(
+            $studentUser,
+            $opportunityTitle,
+            $applicationId,
+            interviewType: $interview->interview_type,
+            scheduledAt: $interview->scheduled_at,
+            durationMinutes: $interview->duration_minutes,
+            meetingLink: $interview->meeting_link,
+            location: $interview->location,
+            contactPhone: $interview->contact_phone,
+            interviewerName: $interview->interviewer_name,
+        );
+
+        return $notification;
+    }
+
+    /**
+     * Organization-facing: a Quiz's scheduled (or otherwise attempted)
+     * result release could not happen because the Organization hasn't
+     * selected/readied a next-step decision yet (Phase 10A.4A) — never a
+     * Student-facing effect. In-app only, deliberately — this is an
+     * operational nudge for an organization already actively managing its
+     * own pipeline, the same posture `notifyQuizCompleted()` already takes
+     * for its own frequent, non-urgent organization-facing event. Sent at
+     * most once per Assessment — see
+     * `QuizResultReleaseService::sendDecisionReminder()`'s own dedup
+     * guard.
+     */
+    public function notifyDecisionRequired(
+        User $organizationUser,
+        string $studentName,
+        string $opportunityTitle,
+        int $applicationId,
+    ): Notification {
+        return $this->create(
+            $organizationUser,
+            'Decision Required',
+            "The scheduled result release for {$studentName}'s assessment ({$opportunityTitle}) ".
+                'has passed, but a next-step decision has not been completed.',
+            type: 'assessment',
+            priority: 'high',
+            actionUrl: $this->organizationApplicationPath($applicationId),
         );
     }
 
@@ -579,6 +718,48 @@ class NotificationService
     }
 
     // -----------------------------------------------------------------
+    // Messaging MVP
+    // -----------------------------------------------------------------
+
+    /**
+     * Recipient-facing (either direction: Organization or Student): a new
+     * message arrived in one of their conversations. Fires exactly once
+     * per `MessagingService::sendMessage()` call, never to the sender.
+     * Deliberately in-app only, no email -- see this phase's own
+     * doc/report on why: a per-message email would spam an active
+     * conversation, and this MVP has no per-conversation "already
+     * notified, don't email again" state to throttle it safely. The
+     * in-app notification (with its own unread badge) plus the
+     * conversation list's own unread state already cover the "come back
+     * and see this" need without an inbox full of one-line emails.
+     *
+     * The message body itself is deliberately never included in the
+     * notification `message` text -- only the sender's display name, the
+     * same "never leak the sensitive payload into a broadly-visible
+     * summary" restraint this service already applies elsewhere (e.g.
+     * `notifyInvitationReceived()` never repeats a private invitation
+     * message body either, beyond what the invitation flow already
+     * shows).
+     */
+    public function notifyNewMessage(
+        User $recipientUser,
+        string $senderDisplayName,
+        Conversation $conversation,
+        bool $recipientIsStudent,
+    ): Notification {
+        return $this->create(
+            $recipientUser,
+            'New Message',
+            "New message from {$senderDisplayName}",
+            type: 'message',
+            priority: 'normal',
+            actionUrl: $recipientIsStudent
+                ? $this->studentConversationPath($conversation->id)
+                : $this->organizationConversationPath($conversation->id),
+        );
+    }
+
+    // -----------------------------------------------------------------
     // action_url helpers — kept in exact sync with the Flutter app's own
     // `AppRoutes` path constants (lib/routes/app_routes.dart). App-relative
     // paths only, never a full domain URL — see docs/ARCHITECTURE.md.
@@ -607,5 +788,15 @@ class NotificationService
     private function organizationOpportunityPath(int $opportunityId): string
     {
         return "/organization/opportunities/{$opportunityId}";
+    }
+
+    private function studentConversationPath(int $conversationId): string
+    {
+        return "/student/messages/{$conversationId}";
+    }
+
+    private function organizationConversationPath(int $conversationId): string
+    {
+        return "/organization/messages/{$conversationId}";
     }
 }

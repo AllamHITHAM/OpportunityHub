@@ -88,6 +88,37 @@ class EducationVerificationManagementTest extends TestCase
         $this->assertStringStartsWith('application/pdf', $response->headers->get('Content-Type'));
     }
 
+    public function test_the_document_response_uses_inline_disposition_not_attachment(): void
+    {
+        // The Admin document-preview fix relies on this already being
+        // `inline` (not `attachment`) -- pins down the exact header this
+        // phase's Flutter-side fix depends on, since nothing here
+        // currently asserts it.
+        Storage::fake('local');
+        $admin = $this->admin();
+        $verification = $this->verificationFor($this->studentWithProfile(), 'pending');
+        Storage::disk('local')->put($verification->document_path, 'fake-pdf-bytes');
+        Sanctum::actingAs($admin);
+
+        $response = $this->get("/api/admin/education-verifications/{$verification->id}/document");
+
+        $response->assertStatus(200);
+        $this->assertStringStartsWith('inline', $response->headers->get('Content-Disposition'));
+    }
+
+    public function test_a_non_admin_is_denied_the_document(): void
+    {
+        Storage::fake('local');
+        $verification = $this->verificationFor($this->studentWithProfile(), 'pending');
+        Storage::disk('local')->put($verification->document_path, 'fake-pdf-bytes');
+        $organizationUser = User::factory()->create(['role' => 'organization', 'status' => 'active']);
+        Sanctum::actingAs($organizationUser);
+
+        $response = $this->getJson("/api/admin/education-verifications/{$verification->id}/document");
+
+        $response->assertStatus(403);
+    }
+
     public function test_a_missing_physical_file_returns_a_controlled_404(): void
     {
         Storage::fake('local');
@@ -112,6 +143,45 @@ class EducationVerificationManagementTest extends TestCase
         $verification = EducationVerification::first();
         $showResponse = $this->getJson("/api/admin/education-verifications/{$verification->id}");
         $showResponse->assertJsonMissingPath('data.document_path');
+    }
+
+    public function test_admin_sees_the_students_current_resubmission_not_the_original(): void
+    {
+        // Phase 8.1: a Student replacing/resubmitting a document never
+        // creates a second row -- the Admin must review the exact same
+        // row, now carrying the new file and back at `pending`.
+        Storage::fake('local');
+        $admin = $this->admin();
+        $student = $this->studentWithProfile();
+        Sanctum::actingAs($student->user);
+        $this->postJson('/api/student/education-verification', [
+            'institution_name' => 'State University',
+            'degree_or_program' => 'BSc',
+            'file' => \Illuminate\Http\UploadedFile::fake()->createWithContent('proof.pdf', 'original bytes'),
+        ])->assertStatus(201);
+        $verification = EducationVerification::where('student_id', $student->profile->id)->firstOrFail();
+        $verification->update(['status' => 'rejected', 'rejection_reason' => 'Blurry.']);
+
+        $this->postJson('/api/student/education-verification', [
+            'institution_name' => 'State University',
+            'degree_or_program' => 'BSc (corrected)',
+            'file' => \Illuminate\Http\UploadedFile::fake()->createWithContent('proof2.pdf', 'replacement bytes'),
+        ])->assertStatus(200);
+
+        Sanctum::actingAs($admin);
+        $showResponse = $this->getJson("/api/admin/education-verifications/{$verification->id}");
+        $showResponse->assertStatus(200)
+            ->assertJsonPath('data.status', 'pending')
+            ->assertJsonPath('data.degree_or_program', 'BSc (corrected)')
+            ->assertJsonPath('data.rejection_reason', null);
+
+        $documentResponse = $this->get("/api/admin/education-verifications/{$verification->id}/document");
+        $documentResponse->assertStatus(200);
+        $this->assertSame('replacement bytes', $documentResponse->streamedContent());
+
+        // Still exactly one row for this student -- never a second,
+        // competing verification record.
+        $this->assertDatabaseCount('education_verifications', 1);
     }
 
     public function test_a_non_admin_is_denied_the_list(): void

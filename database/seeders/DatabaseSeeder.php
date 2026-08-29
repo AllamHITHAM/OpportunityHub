@@ -29,5 +29,13 @@ class DatabaseSeeder extends Seeder
         // fully idempotent and never duplicates or destroys a Skill row
         // on a repeat run.
         $this->call(BaselineSkillSeeder::class);
+
+        // Phase O8.2: same idempotency guarantee as BaselineSkillSeeder
+        // above -- safe to include unconditionally.
+        $this->call(BaselineLocationSeeder::class);
+
+        // Recommendation Accuracy Patch: real alternate names for the
+        // cities BaselineLocationSeeder just seeded -- must run after it.
+        $this->call(BaselineLocationAliasSeeder::class);
     }
 }

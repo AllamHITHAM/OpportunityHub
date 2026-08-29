@@ -9,12 +9,9 @@ use App\Models\Opportunity;
 use App\Models\OrganizationProfile;
 use App\Models\StudentProfile;
 use App\Models\User;
-use App\Services\AssessmentService;
-use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Laravel\Sanctum\Sanctum;
-use ReflectionMethod;
 use Tests\TestCase;
 
 /**
@@ -185,69 +182,54 @@ class AssessmentCreationParityTest extends TestCase
     }
 
     /**
-     * The pre-check (`assessment()->exists()`) covers the common case;
-     * the DB-level `assessments.application_id` unique constraint is the
-     * final authority for a genuine race between two concurrent requests.
-     * True concurrency can't be reproduced inside a single synchronous
-     * PHPUnit process, so this proves the translation logic directly:
-     * a real unique-constraint violation is classified as a duplicate
-     * (and would become a clean 409, never raw SQL), while an unrelated
-     * QueryException is deliberately left alone rather than being masked
-     * as "duplicate".
+     * **Phase 10A.3**: `assessments.application_id` is no longer unique
+     * (see that migration's own doc comment), so the duplicate-conflict
+     * guard is no longer a database constraint translated after the fact
+     * -- it's `AssessmentService::assertNoActiveAssessment()`, checked
+     * inside the creation transaction after row-locking the parent
+     * Application (`lockApplication()`). This proves the guard is keyed on
+     * *active* status, not mere existence: a still-active prior Assessment
+     * blocks a new one (409, matching the pre-10A.3 behavior for the
+     * common case), but a *completed* one does not -- the entire point of
+     * this phase's "Advance to Interview" capability.
      */
-    public function test_only_the_application_id_unique_violation_is_treated_as_a_duplicate_conflict(): void
+    public function test_an_active_assessment_blocks_a_new_one_but_a_completed_one_does_not(): void
     {
         $org = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($org);
         $application = $this->applicationFor($opportunity, 'shortlisted');
+        $application->assessment()->create(['type' => 'interview', 'status' => 'scheduled', 'result' => null]);
 
-        DB::table('assessments')->insert([
-            'application_id' => $application->id,
-            'type' => 'interview',
-            'status' => 'scheduled',
-            'created_at' => now(),
-            'updated_at' => now(),
+        Sanctum::actingAs($org->user);
+
+        // Still active ("scheduled") -- blocked, same as every pre-10A.3
+        // duplicate-assessment test.
+        $this->postJson("/api/organization/applications/{$application->id}/interview", [
+            'interview_type' => 'phone',
+            'scheduled_at' => now()->addDays(3)->toDateTimeString(),
+            'contact_phone' => '+1 555-0100',
+        ])->assertStatus(409);
+        $this->assertDatabaseCount('assessments', 1);
+
+        // Finalize the existing Assessment directly (bypassing the
+        // Complete-Interview endpoint, which is irrelevant to what this
+        // test is proving) and move the application back to a source
+        // status a new Assessment can be created from -- exactly what
+        // Complete Interview / Submit Quiz would really leave behind.
+        $application->assessment->update(['status' => 'completed', 'completed_at' => now()]);
+        $application->update(['status' => 'in_assessment']);
+
+        $response = $this->postJson("/api/organization/applications/{$application->id}/interview", [
+            'interview_type' => 'phone',
+            'scheduled_at' => now()->addDays(5)->toDateTimeString(),
+            'contact_phone' => '+1 555-0200',
         ]);
 
-        $duplicateViolation = null;
-
-        try {
-            DB::table('assessments')->insert([
-                'application_id' => $application->id,
-                'type' => 'interview',
-                'status' => 'scheduled',
-                'created_at' => now(),
-                'updated_at' => now(),
-            ]);
-        } catch (QueryException $e) {
-            $duplicateViolation = $e;
-        }
-
-        $this->assertNotNull($duplicateViolation, 'Expected the unique constraint to reject the duplicate insert.');
-
-        $unrelatedViolation = null;
-
-        try {
-            // A NOT NULL violation on an unrelated table/column -- must
-            // never be mistaken for an assessments.application_id conflict.
-            DB::table('opportunities')->insert(['organization_id' => $opportunity->organization_id]);
-        } catch (QueryException $e) {
-            $unrelatedViolation = $e;
-        }
-
-        $this->assertNotNull($unrelatedViolation, 'Expected the missing required opportunity fields to fail.');
-
-        $service = app(AssessmentService::class);
-        $method = new ReflectionMethod(AssessmentService::class, 'isDuplicateAssessmentViolation');
-        $method->setAccessible(true);
-
-        $this->assertTrue(
-            $method->invoke($service, $duplicateViolation),
-            'A genuine assessments.application_id unique violation must be classified as a duplicate.'
-        );
-        $this->assertFalse(
-            $method->invoke($service, $unrelatedViolation),
-            'An unrelated integrity violation must never be masked as a duplicate assessment.'
+        $response->assertStatus(201);
+        $this->assertDatabaseCount('assessments', 2);
+        $this->assertSame(
+            2,
+            DB::table('assessments')->where('application_id', $application->id)->count(),
         );
     }
 

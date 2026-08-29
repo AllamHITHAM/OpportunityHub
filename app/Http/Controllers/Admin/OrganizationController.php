@@ -11,7 +11,7 @@ class OrganizationController extends Controller
 {
     public function index(): JsonResponse
     {
-        $organizations = OrganizationProfile::with('user')->get();
+        $organizations = OrganizationProfile::with(['user', 'locationRecord'])->get();
 
         return response()->json([
             'success' => true,

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Mail\ApplicationRejectedMail;
+use App\Mail\AssessmentDecisionInterviewMail;
 use App\Mail\InterviewRescheduledMail;
 use App\Mail\InterviewScheduledMail;
 use App\Mail\InvitationReceivedMail;
@@ -10,6 +11,7 @@ use App\Mail\OfferAcceptedMail;
 use App\Mail\OfferDeclinedMail;
 use App\Mail\OfferReceivedMail;
 use App\Mail\QuizAvailableMail;
+use App\Mail\QuizResultMail;
 use App\Models\User;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Mail;
@@ -24,13 +26,15 @@ use Illuminate\Support\Facades\Mail;
  * this service is only ever called from inside one of its convenience
  * methods, never directly from a controller or domain service.
  *
- * Eight workflow emails exist as of Phase 8B-3.1: Offer Received (the
+ * Nine workflow emails exist as of Phase 10A.2: Offer Received (the
  * Phase 7A-4.1 pilot), Interview Scheduled, Interview Rescheduled, Quiz
- * Available, Application Rejected, Offer Accepted, Offer Declined, and
- * Invitation Received (Phase 8B-3.1). Six events remain in-app only
- * (Application Submitted, Application Shortlisted, Quiz Completed, Quiz
- * Result Available, Invitation Accepted, Invitation Declined) -- no method
- * exists here for them; see `NotificationService` for the full matrix.
+ * Available, Application Rejected, Offer Accepted, Offer Declined,
+ * Invitation Received (Phase 8B-3.1), and Assessment Result (Phase
+ * 10A.2 -- only ever queued from `QuizResultReleaseService::release()`,
+ * never from submission itself). Five events remain in-app only
+ * (Application Submitted, Application Shortlisted, Quiz Completed,
+ * Invitation Accepted, Invitation Declined) -- no method exists here for
+ * them; see `NotificationService` for the full matrix.
  *
  * Every call here queues (`Mail::queue()`), never sends synchronously
  * (`Mail::send()`) -- an SMTP failure must never block or roll back the
@@ -159,6 +163,11 @@ class EmailService
      * Student Quiz route, the same `action_url` target
      * `NotificationService::notifyQuizPublished()` already uses for the
      * in-app notification.
+     *
+     * @param  ?Carbon  $availableAt  Phase 10A.4B addendum — see
+     *                        `NotificationService::notifyQuizPublished()`'s
+     *                        own doc comment; `null` preserves the exact
+     *                        pre-addendum email content.
      */
     public function sendQuizAvailableEmail(
         User $recipient,
@@ -166,6 +175,8 @@ class EmailService
         int $assessmentId,
         int $passingScore,
         ?int $timeLimitMinutes = null,
+        ?Carbon $availableAt = null,
+        ?Carbon $dueAt = null,
     ): void {
         Mail::to($recipient->email)->queue(new QuizAvailableMail(
             studentName: $recipient->name,
@@ -173,6 +184,63 @@ class EmailService
             ctaUrl: $this->studentQuizUrl($assessmentId),
             passingScore: $passingScore,
             timeLimitMinutes: $timeLimitMinutes,
+            availableAt: $availableAt,
+            dueAt: $dueAt,
+        ));
+    }
+
+    /**
+     * Queues an "Assessment Result" email to the student -- only ever
+     * called from `QuizResultReleaseService::release()` (Phase 10A.2),
+     * never from `Student\QuizController::submit()` directly, so this
+     * never fires before the result is actually released (immediate,
+     * manual, or scheduled -- see that service's own doc comment).
+     */
+    public function sendQuizResultEmail(
+        User $recipient,
+        string $opportunityTitle,
+        int $applicationId,
+        bool $passed,
+    ): void {
+        Mail::to($recipient->email)->queue(new QuizResultMail(
+            studentName: $recipient->name,
+            opportunityTitle: $opportunityTitle,
+            ctaUrl: $this->studentApplicationUrl($applicationId),
+            passed: $passed,
+        ));
+    }
+
+    /**
+     * Queues the combined "Assessment Update — Interview Invitation" email
+     * (Phase 10A.4A) — only ever called from
+     * `QuizResultReleaseService::releaseInterviewDecision()`, so this never
+     * fires before the Organization's "Advance to Interview" decision is
+     * actually released. Deliberately takes the same student-safe Interview
+     * field subset `sendInterviewScheduledEmail()` already uses.
+     */
+    public function sendAssessmentDecisionInterviewEmail(
+        User $recipient,
+        string $opportunityTitle,
+        int $applicationId,
+        string $interviewType,
+        Carbon $scheduledAt,
+        ?int $durationMinutes = null,
+        ?string $meetingLink = null,
+        ?string $location = null,
+        ?string $contactPhone = null,
+        ?string $interviewerName = null,
+    ): void {
+        Mail::to($recipient->email)->queue(new AssessmentDecisionInterviewMail(
+            studentName: $recipient->name,
+            opportunityTitle: $opportunityTitle,
+            ctaUrl: $this->studentApplicationUrl($applicationId),
+            interviewType: $interviewType,
+            scheduledAt: $scheduledAt,
+            durationMinutes: $durationMinutes,
+            meetingLink: $meetingLink,
+            location: $location,
+            contactPhone: $contactPhone,
+            interviewerName: $interviewerName,
         ));
     }
 

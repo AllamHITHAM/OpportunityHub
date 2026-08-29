@@ -3,6 +3,7 @@
 namespace Tests\Feature\Organization;
 
 use App\Models\OrganizationProfile;
+use App\Models\Skill;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Sanctum\Sanctum;
@@ -276,6 +277,8 @@ class OrganizationOpportunityTest extends TestCase
 
     private function validOpportunityPayload(array $overrides = []): array
     {
+        $skillId = Skill::firstOrCreate(['name' => 'PHP'])->id;
+
         return array_merge([
             'title' => 'Software Engineer',
             'description' => 'A great opportunity.',
@@ -283,6 +286,13 @@ class OrganizationOpportunityTest extends TestCase
             'employment_type' => 'full_time',
             'work_mode' => 'remote',
             'experience_level' => 'junior',
+            // Opportunity Requirements Integrity Patch: both are now
+            // required to create/publish an Opportunity through the real
+            // endpoint -- see `StoreOpportunityRequest`.
+            'eligible_majors' => ['Computer Science'],
+            'skills' => [
+                ['skill_id' => $skillId, 'is_required' => true],
+            ],
         ], $overrides);
     }
 }

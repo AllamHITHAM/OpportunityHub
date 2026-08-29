@@ -107,7 +107,7 @@ class ApplicationEligibilityTest extends TestCase
         $this->assertDatabaseCount('notifications', 0);
     }
 
-    public function test_legacy_field_of_study_fallback_allows_a_matching_student_to_apply(): void
+    public function test_field_of_study_alone_allows_a_matching_student_to_apply(): void
     {
         $student = $this->studentWithProfileAndCv('civil engineering');
         $opportunity = $this->openOpportunity(['field_of_study' => 'Civil Engineering']);
@@ -119,8 +119,11 @@ class ApplicationEligibilityTest extends TestCase
         ])->assertStatus(201);
     }
 
-    public function test_legacy_field_of_study_fallback_rejects_a_mismatched_student(): void
+    public function test_field_of_study_alone_never_blocks_a_mismatched_student(): void
     {
+        // Regression test for the real reported bug: field_of_study set,
+        // eligible_majors genuinely empty -- must NOT restrict eligibility.
+        // field_of_study is descriptive metadata, never an eligibility gate.
         $student = $this->studentWithProfileAndCv('Fine Arts');
         $opportunity = $this->openOpportunity(['field_of_study' => 'Civil Engineering']);
 
@@ -130,8 +133,8 @@ class ApplicationEligibilityTest extends TestCase
             'cv_id' => $student->cv->id,
         ]);
 
-        $response->assertStatus(422);
-        $this->assertDatabaseCount('applications', 0);
+        $response->assertStatus(201);
+        $this->assertDatabaseCount('applications', 1);
     }
 
     public function test_an_unrestricted_opportunity_accepts_any_major(): void

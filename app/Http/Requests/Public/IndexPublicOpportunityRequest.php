@@ -21,6 +21,12 @@ class IndexPublicOpportunityRequest extends FormRequest
             'location' => ['nullable', 'string', 'max:255'],
             'field_of_study' => ['nullable', 'string', 'max:255'],
             'keyword' => ['nullable', 'string', 'max:255'],
+            // Organization Public Profile phase: lets the Company Profile
+            // screen (owner and public) reuse this exact endpoint for its
+            // "Open Opportunities" section instead of a second,
+            // duplicate opportunity-fetching endpoint -- see
+            // `Public\OrganizationController` for how it's used.
+            'organization_id' => ['nullable', 'integer', 'exists:organization_profiles,id'],
             'per_page' => ['nullable', 'integer', 'between:1,100'],
         ];
     }

@@ -103,10 +103,14 @@ class ApplicationAutoMatchingTest extends TestCase
         $this->assertEquals(0.0, (float) $application->match_score);
     }
 
-    public function test_an_opportunity_with_no_skills_or_field_still_produces_a_real_score_from_experience_alone(): void
+    public function test_an_opportunity_with_no_skills_or_eligible_majors_still_produces_a_real_zero_score(): void
     {
         $student = $this->studentWithProfileAndCv();
-        $opportunity = $this->openOpportunity(['field_of_study' => null, 'experience_level' => 'no_experience']);
+        // Deliberately unrestricted (no eligibleMajorRecords) and no
+        // opportunitySkills configured -- on this Remote Opportunity,
+        // Skills and Major are both unavailable, and Location is never
+        // considered at all, so literally nothing is scoreable.
+        $opportunity = $this->openOpportunity(['field_of_study' => null]);
 
         Sanctum::actingAs($student->user);
 
@@ -116,10 +120,9 @@ class ApplicationAutoMatchingTest extends TestCase
 
         $application = Application::where('opportunity_id', $opportunity->id)->firstOrFail();
 
-        // skills and field both unavailable -- only experience (20 weight,
-        // now 100% of the total) is scoreable, and no_experience always
-        // scores 100.
-        $this->assertEquals(100.0, (float) $application->match_score);
+        // Nothing is scoreable -- a genuine, calculated 0.0 ("no
+        // measurable match"), never null and never a fake placeholder.
+        $this->assertEquals(0.0, (float) $application->match_score);
     }
 
     public function test_the_create_response_still_never_exposes_match_score_to_the_student(): void

@@ -33,8 +33,22 @@ class DashboardController extends Controller
             // serialization -- see Interview.php) since the Phase 4A-1
             // Assessment retarget. The real, queryable chain is
             // `interview -> assessment -> application`.
+            //
+            // Phase 10A.4A: excludes a staged "Advance to Interview"
+            // decision's Interview until its origin Quiz Assessment is
+            // released -- the same gate every other Student-facing
+            // Interview path applies (see
+            // `Assessment::isPendingDecisionRelease()`); a dashboard count
+            // is exactly the kind of leak this phase's audit was told to
+            // check for.
             'total_interviews' => Interview::whereHas('assessment.application', function ($query) use ($studentProfile) {
                 $query->where('student_id', $studentProfile->id);
+            })->whereHas('assessment', function ($query) {
+                $query->whereNull('origin_assessment_id')
+                    ->orWhereHas(
+                        'originAssessment',
+                        fn ($originQuery) => $originQuery->whereNotNull('result_released_at'),
+                    );
             })->count(),
         ];
 

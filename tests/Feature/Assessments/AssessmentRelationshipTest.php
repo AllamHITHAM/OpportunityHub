@@ -195,23 +195,48 @@ class AssessmentRelationshipTest extends TestCase
         $this->assertDatabaseMissing('interviews', ['id' => $interview->id]);
     }
 
-    public function test_an_application_can_have_at_most_one_assessment(): void
+    /**
+     * **Phase 10A.3**: renamed from
+     * `test_an_application_can_have_at_most_one_assessment`, which asserted
+     * the exact opposite of what this phase deliberately enables --
+     * `assessments.application_id` is no longer unique (see that
+     * migration's own doc comment), so an application can accumulate real
+     * Assessment history. This proves both halves of the new contract:
+     * [Application::assessments] returns the full ordered history, and
+     * [Application::assessment] (`latestOfMany`) deterministically resolves
+     * to the most recently created one -- never an arbitrary row, and never
+     * throwing just because a second Assessment now exists. The "at most
+     * one *active*" invariant is enforced by `AssessmentService`, not the
+     * schema -- see `AssessmentCreationParityTest`.
+     */
+    public function test_an_application_can_now_accumulate_assessment_history(): void
     {
         $application = $this->applicationFor($this->opportunityFor($this->approvedOrganization()));
 
-        $application->assessment()->create([
+        $first = $application->assessment()->create([
+            'type' => 'quiz',
+            'status' => 'completed',
+            'result' => 'passed',
+            'completed_at' => now(),
+        ]);
+
+        $second = $application->assessment()->create([
             'type' => 'interview',
             'status' => 'scheduled',
             'result' => null,
         ]);
 
-        $this->expectException(\Illuminate\Database\QueryException::class);
+        $this->assertNotSame($first->id, $second->id);
 
-        $application->assessment()->create([
-            'type' => 'interview',
-            'status' => 'scheduled',
-            'result' => null,
-        ]);
+        $history = $application->assessments()->get();
+        $this->assertCount(2, $history);
+        $this->assertSame($first->id, $history->first()->id);
+        $this->assertSame($second->id, $history->last()->id);
+
+        // `assessment()` (singular) is the *latest* one, deterministically
+        // -- not an arbitrary row picked by an unordered query.
+        $application->refresh();
+        $this->assertSame($second->id, $application->assessment->id);
     }
 
     public function test_assessment_completed_at_is_cast_to_a_datetime(): void

@@ -187,6 +187,12 @@ class InterviewController extends Controller
             $assessment->status = 'completed';
             $assessment->completed_at = $interview->completed_at;
             $assessment->result = $this->assessmentResultFor($interview->decision);
+            // Phase 10A.2's result-release gate (`Assessment::isResultReleased()`)
+            // is a Quiz-specific concept -- an Interview result has always
+            // been, and remains, immediately visible to the Student the
+            // instant it's recorded here, so this is released in the same
+            // instant it's completed, never deferred.
+            $assessment->result_released_at = $assessment->completed_at;
             $assessment->save();
         });
 
@@ -223,10 +229,28 @@ class InterviewController extends Controller
             $assessment->delete();
 
             // Never leave an application at `in_assessment` (or, for legacy
-            // rows, `interview_scheduled`) once its only assessment is gone.
-            // Any other status (accepted/rejected/withdrawn/...) was set
-            // independently by the organization and must not be touched.
-            if (in_array($application->status, ['in_assessment', 'interview_scheduled'], true)) {
+            // rows, `interview_scheduled`) once it has *no Assessment left
+            // at all*. Any other status (accepted/rejected/withdrawn/...)
+            // was set independently by the organization and must not be
+            // touched.
+            //
+            // **Phase 10A.3**: deliberately re-checks `assessments()->exists()`
+            // rather than assuming "the just-deleted one was the only one" --
+            // before this phase that assumption was always true (an
+            // application could have at most one Assessment ever), but with
+            // real history now possible, deleting a still-`scheduled`
+            // Interview that was itself an "Advance to Interview" follow-up
+            // to an earlier *completed* Quiz must leave that completed
+            // Quiz's history intact and the application still meaningfully
+            // `in_assessment` (the organization can still act on the
+            // completed Quiz -- Send Offer, Reject, or advance to a new
+            // Interview again) rather than incorrectly reverting all the
+            // way back to `shortlisted` as if no evaluation had ever
+            // happened.
+            if (
+                in_array($application->status, ['in_assessment', 'interview_scheduled'], true)
+                && ! $application->assessments()->exists()
+            ) {
                 $application->status = 'shortlisted';
                 $application->save();
             }

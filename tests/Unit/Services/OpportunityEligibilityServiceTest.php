@@ -84,26 +84,33 @@ class OpportunityEligibilityServiceTest extends TestCase
         $this->assertTrue($this->eligibility->isStudentEligible($opportunity, $student));
     }
 
-    public function test_legacy_field_of_study_fallback_matches(): void
+    public function test_field_of_study_alone_never_restricts_eligibility(): void
     {
+        // A real regression case: field_of_study is set but eligible_majors
+        // is genuinely empty -- the Opportunity must remain unrestricted.
+        // field_of_study is descriptive metadata, never an eligibility
+        // gate (see OpportunityEligibilityService's own doc comment).
         $opportunity = $this->opportunityFor(['field_of_study' => 'Civil Engineering']);
         $student = $this->studentWithMajor('civil engineering');
 
         $this->assertTrue($this->eligibility->isStudentEligible($opportunity, $student));
     }
 
-    public function test_legacy_field_of_study_fallback_rejects_a_mismatch(): void
+    public function test_field_of_study_does_not_reject_a_completely_different_major(): void
     {
+        // Same regression case as above, but with a major that wouldn't
+        // even normalize-match field_of_study -- still eligible, because
+        // field_of_study is never consulted for eligibility at all.
         $opportunity = $this->opportunityFor(['field_of_study' => 'Civil Engineering']);
         $student = $this->studentWithMajor('Fine Arts');
 
-        $this->assertFalse($this->eligibility->isStudentEligible($opportunity, $student));
+        $this->assertTrue($this->eligibility->isStudentEligible($opportunity, $student));
     }
 
-    public function test_explicit_eligible_majors_take_precedence_over_field_of_study(): void
+    public function test_explicit_eligible_majors_are_the_only_restriction_field_of_study_is_ignored(): void
     {
         // field_of_study says Civil Engineering, but the explicit list
-        // (rule A) is the canonical source once it exists -- Fine Arts is
+        // (rule A) is the only source of restriction -- Fine Arts is
         // accepted because it's in the explicit list, even though it
         // wouldn't match field_of_study.
         $opportunity = $this->opportunityFor(['field_of_study' => 'Civil Engineering']);
@@ -114,6 +121,21 @@ class OpportunityEligibilityServiceTest extends TestCase
         $student = $this->studentWithMajor('Fine Arts');
 
         $this->assertTrue($this->eligibility->isStudentEligible($opportunity->fresh(), $student));
+    }
+
+    public function test_a_mismatched_major_is_still_rejected_by_an_explicit_list_even_with_field_of_study_set(): void
+    {
+        // The inverse of the previous test -- an explicit eligible_majors
+        // list still restricts normally; only the field_of_study fallback
+        // was removed, not rule (A) itself.
+        $opportunity = $this->opportunityFor(['field_of_study' => 'Civil Engineering']);
+        $opportunity->eligibleMajorRecords()->create([
+            'major_name' => 'Fine Arts',
+            'normalized_major_name' => 'fine arts',
+        ]);
+        $student = $this->studentWithMajor('Computer Science');
+
+        $this->assertFalse($this->eligibility->isStudentEligible($opportunity->fresh(), $student));
     }
 
     public function test_an_opportunity_with_neither_is_unrestricted(): void
@@ -148,12 +170,15 @@ class OpportunityEligibilityServiceTest extends TestCase
         $this->assertFalse($this->eligibility->isStudentEligible($opportunity, $student));
     }
 
-    public function test_a_null_student_major_is_rejected_by_legacy_field_of_study(): void
+    public function test_a_null_student_major_is_still_eligible_when_only_field_of_study_is_set(): void
     {
+        // field_of_study alone (no explicit eligible_majors) never
+        // restricts eligibility -- not even for a Student with no major
+        // set at all, since there's nothing to be restricted by.
         $opportunity = $this->opportunityFor(['field_of_study' => 'Civil Engineering']);
         $student = $this->studentWithMajor(null);
 
-        $this->assertFalse($this->eligibility->isStudentEligible($opportunity, $student));
+        $this->assertTrue($this->eligibility->isStudentEligible($opportunity, $student));
     }
 
     // -----------------------------------------------------------------

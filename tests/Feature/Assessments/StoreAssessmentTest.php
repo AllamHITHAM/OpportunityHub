@@ -222,16 +222,52 @@ class StoreAssessmentTest extends TestCase
         return [
             'pending' => ['pending'],
             'reviewed' => ['reviewed'],
+            'offer_sent' => ['offer_sent'],
             'accepted' => ['accepted'],
             'rejected' => ['rejected'],
             'withdrawn' => ['withdrawn'],
-            // An application already at the generic `in_assessment` state
-            // must never accept a second assessment -- source-status
-            // validation blocks it here, and assertNoExistingAssessment()
-            // (see test_duplicate_assessment_at_in_assessment_status_is_blocked)
-            // provides the same protection when a real Assessment is present.
-            'in_assessment' => ['in_assessment'],
+            // `in_assessment` is deliberately absent from this list as of
+            // Phase 10A.3 -- it's no longer categorically invalid, since it
+            // now also describes a real, legitimate state: an ongoing
+            // evaluation chain whose most recent Assessment has already
+            // been finalized (a completed Quiz, before "Advance to
+            // Interview"). See
+            // test_in_assessment_with_no_active_assessment_is_allowed
+            // below for that case, and
+            // test_duplicate_assessment_at_in_assessment_status_is_blocked
+            // for the case this list used to cover on its own -- an
+            // `in_assessment` application whose Assessment is still active,
+            // which is still correctly blocked, just by
+            // assertNoActiveAssessment() alone now rather than by both
+            // guards redundantly.
         ];
+    }
+
+    /**
+     * The Phase 10A.3 case carved out of `invalidSourceStatuses()` above:
+     * an `in_assessment` application with no *active* Assessment blocking
+     * it (either no Assessment at all -- an edge case, since `in_assessment`
+     * is normally only ever set alongside a real Assessment -- or, more
+     * realistically, one that's already `completed`) is now a legitimate
+     * source for a new Assessment, matching "Advance to Interview".
+     */
+    public function test_in_assessment_with_no_active_assessment_is_allowed(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org);
+        $application = $this->applicationFor($opportunity, 'in_assessment');
+
+        Sanctum::actingAs($org->user);
+
+        $response = $this->postJson(
+            "/api/organization/applications/{$application->id}/assessments",
+            $this->validAssessmentPayload()
+        );
+
+        $response->assertStatus(201)
+            ->assertJsonPath('success', true);
+
+        $this->assertDatabaseCount('assessments', 1);
     }
 
     #[DataProvider('invalidSourceStatuses')]

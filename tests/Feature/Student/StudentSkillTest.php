@@ -121,6 +121,87 @@ class StudentSkillTest extends TestCase
         $this->assertDatabaseHas('student_skills', ['id' => $studentSkill->id]);
     }
 
+    public function test_an_unauthenticated_request_to_add_a_skill_is_rejected(): void
+    {
+        $skill = Skill::create(['name' => 'PHP']);
+
+        $response = $this->postJson('/api/student/skills', [
+            'skill_id' => $skill->id,
+            'level' => 'advanced',
+        ]);
+
+        $response->assertStatus(401);
+    }
+
+    public function test_an_organization_cannot_add_a_student_skill(): void
+    {
+        $skill = Skill::create(['name' => 'PHP']);
+        $org = User::factory()->create(['role' => 'organization', 'status' => 'active']);
+        Sanctum::actingAs($org);
+
+        $response = $this->postJson('/api/student/skills', [
+            'skill_id' => $skill->id,
+            'level' => 'advanced',
+        ]);
+
+        $response->assertStatus(403);
+    }
+
+    public function test_a_nonexistent_skill_id_is_rejected(): void
+    {
+        $student = $this->studentWithProfile();
+        Sanctum::actingAs($student->user);
+
+        $response = $this->postJson('/api/student/skills', [
+            'skill_id' => 999999,
+            'level' => 'advanced',
+        ]);
+
+        $response->assertStatus(422);
+        $this->assertDatabaseCount('student_skills', 0);
+    }
+
+    public function test_an_invalid_level_is_rejected(): void
+    {
+        $student = $this->studentWithProfile();
+        $skill = Skill::create(['name' => 'PHP']);
+        Sanctum::actingAs($student->user);
+
+        $response = $this->postJson('/api/student/skills', [
+            'skill_id' => $skill->id,
+            'level' => 'guru',
+        ]);
+
+        $response->assertStatus(422);
+        $this->assertDatabaseCount('student_skills', 0);
+    }
+
+    public function test_a_client_supplied_student_id_can_never_attribute_the_skill_to_another_student(): void
+    {
+        $student = $this->studentWithProfile();
+        $otherStudent = $this->studentWithProfile();
+        $skill = Skill::create(['name' => 'PHP']);
+        Sanctum::actingAs($student->user);
+
+        $response = $this->postJson('/api/student/skills', [
+            // A spoofed student_id must be silently ignored -- the row is
+            // always attributed to the authenticated student, never this.
+            'student_id' => $otherStudent->profile->id,
+            'skill_id' => $skill->id,
+            'level' => 'advanced',
+        ]);
+
+        $response->assertStatus(201);
+        $this->assertDatabaseHas('student_skills', [
+            'student_id' => $student->profile->id,
+            'skill_id' => $skill->id,
+        ]);
+        $this->assertDatabaseMissing('student_skills', [
+            'student_id' => $otherStudent->profile->id,
+            'skill_id' => $skill->id,
+        ]);
+    }
+
     private function studentWithProfile(): object
     {
         $user = User::factory()->create([

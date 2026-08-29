@@ -172,6 +172,14 @@ class StudentAssessmentTest extends TestCase
         $assessment->interview->save();
         $assessment->status = 'completed';
         $assessment->result = 'passed';
+        $assessment->completed_at = now();
+        // Phase 10A.2: an Interview result is always released the instant
+        // it's completed (see `Organization\InterviewController::complete()`)
+        // -- this fixture bypasses that controller, so it sets the same
+        // field directly to keep testing this test's own actual concern
+        // (hiding `interview.decision`), not the unrelated result-release
+        // gate.
+        $assessment->result_released_at = $assessment->completed_at;
         $assessment->save();
 
         Sanctum::actingAs($student->user);

@@ -20,7 +20,19 @@ class InterviewController extends Controller
 
         $interviews = Interview::whereHas('assessment.application', function ($query) use ($studentId) {
             $query->where('student_id', $studentId);
-        })->with('assessment.application.opportunity')->get();
+        })
+            // Phase 10A.4A: same gate as `Student\AssessmentController::index()`
+            // -- a staged "Advance to Interview" decision's Interview must
+            // never appear here before its origin Quiz Assessment is
+            // released. See `Assessment::isPendingDecisionRelease()`.
+            ->whereHas('assessment', function ($query) {
+                $query->whereNull('origin_assessment_id')
+                    ->orWhereHas(
+                        'originAssessment',
+                        fn ($originQuery) => $originQuery->whereNotNull('result_released_at'),
+                    );
+            })
+            ->with('assessment.application.opportunity')->get();
 
         $interviews->each(function (Interview $interview) {
             $this->hideInternalInterviewFields($interview);

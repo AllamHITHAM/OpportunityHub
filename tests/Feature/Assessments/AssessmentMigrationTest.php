@@ -45,7 +45,54 @@ use Tests\TestCase;
  * (`2026_08_20_110000_create_opportunity_eligible_majors_table`) sits on
  * top of that, making both step counts six higher; as of Phase Final-QA-1,
  * one more (`2026_08_20_164118_add_contact_phone_to_interviews_table`) sits
- * on top of that, making both step counts seven higher.
+ * on top of that, making both step counts seven higher; as of Phase
+ * 10A.2, two more
+ * (`2026_08_25_090000_add_display_mode_and_result_release_to_quizzes_table`,
+ * `2026_08_25_090100_add_result_released_at_to_assessments_table`) sit on
+ * top of that, making both step counts nine higher; as of Phase 10A.3, one
+ * more
+ * (`2026_08_26_090000_remove_unique_constraint_from_assessments_application_id`)
+ * sits on top of that, making both step counts ten higher; as of Phase
+ * 10A.4A, one more
+ * (`2026_08_27_090000_add_decision_release_fields_to_assessments_table`)
+ * sits on top of that, making both step counts eleven higher; as of Phase
+ * 10A.4B, two more
+ * (`2026_08_28_090000_add_recruitment_process_to_opportunities_table`,
+ * `2026_08_28_090100_add_shared_quiz_template_support`) sit on top of that,
+ * making both step counts thirteen higher (22/23); as of the Phase 10A.4B
+ * addendum, two more
+ * (`2026_08_29_090000_add_availability_policy_to_quizzes_table`,
+ * `2026_08_29_090100_add_availability_dates_to_assessments_table`) sit on
+ * top of that, making both step counts fifteen higher (24/25); as of Phase
+ * O8.2, three more
+ * (`2026_08_29_090200_create_locations_table`,
+ * `2026_08_29_090300_create_student_available_locations_table`,
+ * `2026_08_29_090400_add_location_id_to_opportunities_table`) sit on top of
+ * that, making both step counts eighteen higher (27/28); as of the Student
+ * Location Profile Patch, one more
+ * (`2026_08_29_090500_add_current_location_id_to_student_profiles_table`)
+ * sits on top of that, making both step counts nineteen higher (28/29); as
+ * of the Recommendation Accuracy Patch, one more
+ * (`2026_08_29_090600_create_location_aliases_table`) sits on top of that,
+ * making both step counts twenty higher (29/30); as of the Candidate
+ * Opportunity Preferences patch, one more
+ * (`2026_08_30_090000_add_interested_in_to_student_profiles_table`) sits on
+ * top of that, making both step counts twenty-one higher (30/31); as of the
+ * Organization Candidate Profile Enrichment + Messaging MVP phase, three
+ * more (`2026_08_31_090000_create_conversations_table`,
+ * `2026_08_31_090100_create_messages_table`,
+ * `2026_08_31_090200_add_message_type_to_notifications_table`) sit on top
+ * of that, making both step counts twenty-four higher (33/34); as of the
+ * Organization Public Profile phase, two more
+ * (`2026_09_01_090000_add_location_id_to_organization_profiles_table`,
+ * `2026_09_01_090100_create_organization_posts_table`) sit on top of
+ * that, making both step counts twenty-six higher (35/36); as of the
+ * Company Profile Polish phase, one more
+ * (`2026_09_02_090000_add_image_path_to_organization_posts_table`) sits
+ * on top of that, making both step counts twenty-seven higher (36/37); as
+ * of the Closed Opportunities Scalability Polish phase, one more
+ * (`2026_09_03_090000_add_closed_at_to_opportunities_table`) sits on top
+ * of that, making both step counts twenty-eight higher (37/38).
  */
 class AssessmentMigrationTest extends TestCase
 {
@@ -227,11 +274,34 @@ class AssessmentMigrationTest extends TestCase
         ]);
     }
 
-    public function test_new_unique_constraint_on_assessments_application_id_is_enforced(): void
+    /**
+     * As of Phase 10A.3, `assessments.application_id` is deliberately no
+     * longer unique -- renamed from
+     * `test_new_unique_constraint_on_assessments_application_id_is_enforced`
+     * (Phase 4A-1), which asserted the exact opposite of what this
+     * migration now guarantees. See
+     * `2026_08_26_090000_remove_unique_constraint_from_assessments_application_id`'s
+     * own doc comment for why: an application can now accumulate real
+     * Assessment history (a completed Quiz followed by a new Interview),
+     * so a second row for the same `application_id` must succeed at the
+     * database level -- the "at most one *active*" invariant is enforced
+     * in `AssessmentService`, not the schema (see
+     * `AssessmentServiceActiveAssessmentTest`).
+     */
+    public function test_assessments_application_id_is_no_longer_unique(): void
     {
         $applicationId = $this->seedApplication();
 
-        DB::table('assessments')->insert([
+        $firstId = DB::table('assessments')->insertGetId([
+            'application_id' => $applicationId,
+            'type' => 'interview',
+            'status' => 'completed',
+            'completed_at' => now(),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $secondId = DB::table('assessments')->insertGetId([
             'application_id' => $applicationId,
             'type' => 'interview',
             'status' => 'scheduled',
@@ -239,15 +309,48 @@ class AssessmentMigrationTest extends TestCase
             'updated_at' => now(),
         ]);
 
-        $this->expectException(\Illuminate\Database\QueryException::class);
+        $this->assertNotSame($firstId, $secondId);
+        $this->assertSame(
+            2,
+            DB::table('assessments')->where('application_id', $applicationId)->count(),
+        );
 
-        DB::table('assessments')->insert([
-            'application_id' => $applicationId,
-            'type' => 'interview',
-            'status' => 'scheduled',
-            'created_at' => now(),
-            'updated_at' => now(),
-        ]);
+        // Clean up the duplicate before this test ends: `DatabaseMigrations`
+        // automatically rolls every migration back at teardown (see that
+        // trait's own `beforeApplicationDestroyed` hook), and this
+        // migration's own `down()` re-adds the unique constraint this test
+        // just proved is gone -- by design, that's only safe to roll back
+        // while `application_id` really is still unique (see the
+        // migration's own doc comment on `down()`). Leaving two rows with
+        // the same `application_id` in place would make teardown itself
+        // fail with the exact violation this test demonstrates, for a
+        // reason that has nothing to do with this test's own assertions.
+        DB::table('assessments')->where('id', $secondId)->delete();
+    }
+
+    /**
+     * The unique constraint's replacement -- a plain index -- still exists,
+     * so `Application::assessments()`/the active-assessment-invariant
+     * lookup in `AssessmentService` aren't full table scans. Asserted
+     * directly against the schema rather than indirectly through query
+     * behavior, since a missing index would only ever show up as a
+     * performance regression, never a functional test failure.
+     */
+    public function test_assessments_application_id_still_has_a_plain_index(): void
+    {
+        // `Schema::getIndexes()` (driver-agnostic, unlike `SHOW INDEX FROM`
+        // which is MySQL-only and would fail against this test suite's
+        // sqlite `:memory:` connection) reports each index's own `unique`
+        // flag directly, so this checks both "an index on `application_id`
+        // still exists" and "it is not unique" in one pass.
+        $indexes = collect(\Illuminate\Support\Facades\Schema::getIndexes('assessments'));
+
+        $applicationIdIndex = $indexes->first(
+            fn (array $index) => $index['columns'] === ['application_id']
+        );
+
+        $this->assertNotNull($applicationIdIndex, 'Expected an index on assessments.application_id');
+        $this->assertFalse($applicationIdIndex['unique']);
     }
 
     public function test_assessment_id_not_null_is_enforced_after_migration(): void
@@ -298,7 +401,7 @@ class AssessmentMigrationTest extends TestCase
         // to `interviews`, a no-op for this assertion) and the retarget
         // migration itself. Assessments must still exist immediately after,
         // since retarget's `down()` reads from it.
-        Artisan::call('migrate:rollback', ['--step' => 16]);
+        Artisan::call('migrate:rollback', ['--step' => 37]);
 
         $interview = DB::table('interviews')->first();
         $this->assertSame($applicationId, $interview->application_id);
@@ -326,7 +429,7 @@ class AssessmentMigrationTest extends TestCase
         // `create_questions_table`/`create_quizzes_table`, Phase 6B-0's
         // `add_in_assessment_status_to_applications_table`, the retarget
         // migration, and `create_assessments_table` itself.
-        Artisan::call('migrate:rollback', ['--step' => 17]);
+        Artisan::call('migrate:rollback', ['--step' => 38]);
 
         $this->assertFalse(\Illuminate\Support\Facades\Schema::hasTable('assessments'));
         $this->assertTrue(\Illuminate\Support\Facades\Schema::hasColumn('interviews', 'application_id'));
@@ -335,7 +438,7 @@ class AssessmentMigrationTest extends TestCase
 
     public function test_application_id_not_null_is_enforced_after_rollback(): void
     {
-        Artisan::call('migrate:rollback', ['--step' => 16]);
+        Artisan::call('migrate:rollback', ['--step' => 37]);
 
         $this->expectException(\Illuminate\Database\QueryException::class);
 
@@ -350,7 +453,7 @@ class AssessmentMigrationTest extends TestCase
 
     public function test_application_id_foreign_key_rejects_a_nonexistent_application_after_rollback(): void
     {
-        Artisan::call('migrate:rollback', ['--step' => 16]);
+        Artisan::call('migrate:rollback', ['--step' => 37]);
 
         $this->expectException(\Illuminate\Database\QueryException::class);
 
@@ -367,7 +470,7 @@ class AssessmentMigrationTest extends TestCase
     {
         $applicationId = $this->seedApplication();
 
-        Artisan::call('migrate:rollback', ['--step' => 16]);
+        Artisan::call('migrate:rollback', ['--step' => 37]);
 
         DB::table('interviews')->insert([
             'application_id' => $applicationId,
@@ -402,7 +505,7 @@ class AssessmentMigrationTest extends TestCase
      */
     private function rollBackRetargetMigrations(): void
     {
-        Artisan::call('migrate:rollback', ['--step' => 16]);
+        Artisan::call('migrate:rollback', ['--step' => 37]);
     }
 
     private function insertLegacyInterview(int $applicationId, array $overrides = []): int

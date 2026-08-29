@@ -12,7 +12,6 @@ use App\Services\OpportunityEligibilityService;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
 class ApplicationController extends Controller
@@ -38,10 +37,17 @@ class ApplicationController extends Controller
             ], 404);
         }
 
-        if (
-            $opportunity->application_deadline &&
-            now()->startOfDay()->gt(Carbon::parse($opportunity->application_deadline)->startOfDay())
-        ) {
+        // Final Company Profile Manual-E2E Bug Fix: centralized on
+        // `Opportunity::hasDeadlinePassed()` (was an inline Carbon
+        // comparison duplicated only here) -- now the exact same "has the
+        // deadline passed" rule the public discovery/show endpoints and
+        // the auto-close sweep also use, so this independent apply-time
+        // guard can never silently drift from what "open" means anywhere
+        // else in the app. Kept as its own check (distinct from the
+        // `status !== 'open'` guard above) so this specific 422 message
+        // stays honest: the Opportunity is real and was open, just past
+        // its deadline -- not simply "not found".
+        if ($opportunity->hasDeadlinePassed()) {
             return response()->json([
                 'success' => false,
                 'message' => 'Application deadline has passed',

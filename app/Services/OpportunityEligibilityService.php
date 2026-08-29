@@ -20,7 +20,9 @@ use Illuminate\Support\Collection;
  * creating an Invitation), and `Student\ApplicationController` (before
  * creating an Application) -- one shared implementation, so the
  * normalization/matching rule can never drift between the three call
- * sites.
+ * sites. [isLocationEligible] and [isTypeInterestEligible] below are
+ * Recommendation-only extensions (see each method's own doc comment) --
+ * they do not gate direct Apply or Invitation creation.
  */
 class OpportunityEligibilityService
 {
@@ -31,29 +33,21 @@ class OpportunityEligibilityService
      * A. [$opportunity] has explicit eligible majors (`eligibleMajors`
      *    rows) -- [$student]'s `major` must normalize-match at least one
      *    of them.
-     * B. [$opportunity] has no explicit eligible majors but a nonblank
-     *    legacy `field_of_study` -- [$student]'s `major` must
-     *    normalize-match that single value, using the exact same
-     *    normalization rule.
-     * C. [$opportunity] has neither -- unrestricted, always eligible.
-     *
-     * A null/blank [$student] major can never satisfy A or B (there is
-     * nothing to compare), so it's only ever eligible under C.
+     * B. [$opportunity] has no explicit eligible majors -- unrestricted,
+     *    always eligible. `field_of_study` is descriptive metadata about
+     *    the opportunity, never an eligibility restriction, so it is
+     *    deliberately never consulted here -- see [Opportunity]'s own doc
+     *    comment on `field_of_study` vs. `eligibleMajors`.
      */
     public function isStudentEligible(Opportunity $opportunity, StudentProfile $student): bool
     {
         $eligibleMajors = $opportunity->eligibleMajorRecords;
 
-        if ($eligibleMajors->isNotEmpty()) {
-            return $this->majorMatchesAny($student->major, $eligibleMajors->pluck('normalized_major_name'));
+        if ($eligibleMajors->isEmpty()) {
+            return true;
         }
 
-        $fieldOfStudy = $opportunity->field_of_study;
-        if ($fieldOfStudy !== null && trim($fieldOfStudy) !== '') {
-            return $this->majorMatchesAny($student->major, collect([MajorNormalizer::normalize($fieldOfStudy)]));
-        }
-
-        return true;
+        return $this->majorMatchesAny($student->major, $eligibleMajors->pluck('normalized_major_name'));
     }
 
     /**
@@ -66,5 +60,77 @@ class OpportunityEligibilityService
         }
 
         return $normalizedTargets->contains(MajorNormalizer::normalize($studentMajor));
+    }
+
+    /**
+     * Location eligibility (Phase O8.2) -- deliberately a *separate*
+     * method from [isStudentEligible], not folded into it: major
+     * eligibility already gates direct Apply and Invitation creation, and
+     * folding location in there too would immediately make every existing
+     * Student -- none of whom have any [StudentProfile::availableLocations]
+     * configured yet, since the field is brand new -- unable to apply to
+     * or be invited to any On-site/Hybrid Opportunity until they fill it
+     * in. That is a much larger, retroactive behavior change than this
+     * phase asked for. This method is used only by
+     * `Organization\OpportunityRecommendationController`, where being
+     * excluded from a *recommendation* list carries no such risk -- the
+     * Student can still be found via Candidate Search or apply directly.
+     *
+     * Rule (see docs/BUSINESS_RULES.md section 5a-i for the full table):
+     * - `work_mode = remote`: location is irrelevant -- always eligible,
+     *   never consulted at all.
+     * - `work_mode = onsite` or `hybrid`, but the Opportunity itself has
+     *   no `location_id` set (a historical Opportunity from before this
+     *   phase, or one an Organization simply hasn't set yet): there is
+     *   nothing to compare against, so -- mirroring rule B of
+     *   [isStudentEligible] above (empty `eligibleMajors` = unrestricted)
+     *   -- this is treated as unrestricted, not a block.
+     * - `work_mode = onsite` or `hybrid`, and the Opportunity has a real
+     *   `location_id`: the Student is eligible only if that ID appears in
+     *   their own `availableLocations`. A Student with zero configured
+     *   locations is never guessed into either outcome -- they are simply
+     *   not eligible (excluded from ranking), the truthful "cannot
+     *   confirm" answer, never a false positive.
+     */
+    public function isLocationEligible(Opportunity $opportunity, StudentProfile $student): bool
+    {
+        if ($opportunity->work_mode === 'remote') {
+            return true;
+        }
+
+        if ($opportunity->location_id === null) {
+            return true;
+        }
+
+        $availableLocationIds = $student->availableLocations->pluck('id');
+
+        return $availableLocationIds->contains($opportunity->location_id);
+    }
+
+    /**
+     * Opportunity Type interest eligibility (Candidate Opportunity
+     * Preferences patch) -- mirrors [isLocationEligible]'s scoping
+     * exactly: used only by `Organization\OpportunityRecommendationController`,
+     * never by direct Apply or Invitation creation (this Student
+     * preference does not restrict what a Student may apply to or be
+     * invited to -- it only narrows who is proactively *recommended*).
+     *
+     * A Student with no `interested_in` recorded at all (`null` or an
+     * empty array -- every profile created before this patch, since the
+     * column is never backfilled) is treated as unrestricted, matching
+     * every other "nothing configured" rule in this service
+     * ([isStudentEligible] rule B, [isLocationEligible]'s unconfigured-
+     * location case): missing preference data excludes no one, it is
+     * never guessed into a restriction.
+     */
+    public function isTypeInterestEligible(Opportunity $opportunity, StudentProfile $student): bool
+    {
+        $interestedIn = $student->interested_in;
+
+        if ($interestedIn === null || $interestedIn === []) {
+            return true;
+        }
+
+        return in_array($opportunity->opportunity_type, $interestedIn, true);
     }
 }

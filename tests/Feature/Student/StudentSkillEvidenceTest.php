@@ -242,6 +242,56 @@ class StudentSkillEvidenceTest extends TestCase
         $this->assertDatabaseCount('student_skills', 1);
     }
 
+    public function test_manually_adding_a_skill_already_held_from_cv_ai_is_blocked(): void
+    {
+        $student = $this->studentWithProfile();
+        $skill = Skill::create(['name' => 'Flutter']);
+        $cv = $this->cvFor($student->profile->id);
+        CvSkillEvidence::create([
+            'student_id' => $student->profile->id,
+            'cv_id' => $cv->id,
+            'skill_id' => $skill->id,
+        ]);
+        $student->profile->studentSkills()->create([
+            'skill_id' => $skill->id,
+            'level' => 'intermediate',
+            'source' => 'cv_ai',
+        ]);
+        Sanctum::actingAs($student->user);
+
+        $response = $this->postJson('/api/student/skills', [
+            'skill_id' => $skill->id,
+            'level' => 'beginner',
+        ]);
+
+        $response->assertStatus(409)
+            ->assertJsonPath('message', 'You have already added this skill');
+        // The original cv_ai row is untouched -- still exactly one row,
+        // still source cv_ai, never downgraded or overwritten.
+        $this->assertDatabaseCount('student_skills', 1);
+        $this->assertDatabaseHas('student_skills', [
+            'student_id' => $student->profile->id,
+            'skill_id' => $skill->id,
+            'source' => 'cv_ai',
+            'level' => 'intermediate',
+        ]);
+    }
+
+    public function test_a_manual_add_never_creates_cv_skill_evidence(): void
+    {
+        $student = $this->studentWithProfile();
+        $skill = Skill::create(['name' => 'Excel']);
+        Sanctum::actingAs($student->user);
+
+        $response = $this->postJson('/api/student/skills', [
+            'skill_id' => $skill->id,
+            'level' => 'beginner',
+        ]);
+
+        $response->assertStatus(201);
+        $this->assertDatabaseCount('cv_skill_evidence', 0);
+    }
+
     public function test_matching_service_score_is_unchanged_regardless_of_evidence_source(): void
     {
         $skill = Skill::create(['name' => 'AutoCAD']);

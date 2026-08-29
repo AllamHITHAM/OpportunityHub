@@ -108,7 +108,8 @@ shared shape:
 
 ```
 Application
-  hasOne Assessment
+  hasOne Assessment       (the current/latest one — latestOfMany; Phase 10A.3)
+  hasMany Assessment      (full history, oldest first; Phase 10A.3)
   hasOne Offer            (Phase 6C-1)
   hasMany QuizAttempt    (Phase 6B-3)
 
@@ -159,10 +160,23 @@ Offer                      (Phase 6C-1)
   direct `Application`-to-`Quiz`/`Question` relationship; nothing in this
   phase needed one, and adding one would just be a second path to the same
   data.
-- An application has at most one assessment (enforced by
-  `assessments.application_id` being unique), and, symmetrically, an
-  assessment has at most one quiz (enforced by `quizzes.assessment_id`
-  being unique). As of Phase 6B-1, `quiz` is no longer merely a
+- **As of Phase 10A.3, an application can accumulate Assessment *history*** —
+  a completed Quiz followed by a real "Advance to Interview" Assessment,
+  both preserved permanently — so `assessments.application_id` is
+  deliberately no longer unique. What remains invariant is that an
+  application has **at most one *active* (non-final) Assessment at a
+  time**, enforced application-side by `AssessmentService` (row-locking the
+  parent `Application`, then checking history for an active row) rather
+  than a database constraint, since a per-application unique constraint and
+  real history are mutually exclusive. `Application::assessment()` (the
+  `hasOne`) resolves to the *current/latest* one via `latestOfMany()`;
+  `Application::assessments()` (the `hasMany`) is the full ordered history
+  — see "Assessment History Architecture (Phase 10A.3)" below for the full
+  design and the alternatives considered. Symmetrically, an assessment
+  still has at most one quiz (enforced by `quizzes.assessment_id` being
+  unique) — that constraint is untouched; each individual `Assessment` row
+  is still exactly one `type`, with exactly one matching detail record. As
+  of Phase 6B-1, `quiz` is no longer merely a
   schema-ready `assessment.type` value — real `quizzes`/`questions` tables,
   a `QuizController`, and organization-side authoring all exist. As of
   Phase 6B-3, real student-facing Quiz taking/grading exists too — see
@@ -362,11 +376,12 @@ AssessmentController::store() -- type=quiz --> AssessmentService::createQuizAsse
 - **`App\Services\AssessmentService`** is the single shared write layer,
   following this codebase's existing controller+service convention (see
   `MatchingService` / `ApplicationAnalysisController`). It owns:
-  the allowed-source-status check (`shortlisted`/`interview_scheduled` —
-  legacy compatibility only, see below), the duplicate-assessment
-  pre-check, the one database transaction, `Assessment` + `Interview`/
-  `Quiz` (Phase 6B-1) creation, and (via the private
-  `transitionToInAssessment()` helper — see Phase 6B-0 below) the
+  the allowed-source-status check (`shortlisted`/`interview_scheduled`/
+  `in_assessment` — see below for why `in_assessment` was added in Phase
+  10A.3), the active-Assessment check (Phase 10A.3 — previously a
+  duplicate-*any*-assessment check), the one database transaction,
+  `Assessment` + `Interview`/`Quiz` (Phase 6B-1) creation, and (via the
+  private `transitionToInAssessment()` helper — see Phase 6B-0 below) the
   `application.status = in_assessment` / `reviewed_at = now()` side
   effect. `createQuizAssessment()` (Phase 6B-1) is `createInterviewAssessment()`'s
   sibling: same precondition checks, same transaction pattern, same status
@@ -383,12 +398,19 @@ AssessmentController::store() -- type=quiz --> AssessmentService::createQuizAsse
   service→controller boundary for the two failure cases each controller
   must translate into its own wording:
   `App\Exceptions\InvalidAssessmentSourceStatusException` and
-  `App\Exceptions\AssessmentAlreadyExistsException`. A real
-  `assessments.application_id` unique-constraint violation (the final
-  concurrency authority, for the narrow race the pre-check can't close) is
-  translated into the same `AssessmentAlreadyExistsException` — but only
-  after confirming the violation is actually that specific constraint, so
-  an unrelated integrity failure is never masked as "duplicate".
+  `App\Exceptions\AssessmentAlreadyExistsException`.
+  **Phase 10A.3 revision**: before this phase, the final concurrency
+  authority for a duplicate-assessment race was a real
+  `assessments.application_id` unique-constraint violation, translated into
+  `AssessmentAlreadyExistsException` after confirming the violation was
+  actually that specific constraint. That constraint no longer exists (it
+  can't, once Assessment history is allowed — see "Assessment History
+  Architecture (Phase 10A.3)" below), so the concurrency authority is now
+  row-locking the parent `Application` (`lockForUpdate()`) inside the
+  creation transaction before checking for an active Assessment — no
+  `QueryException` translation involved at all any more. Two concurrent
+  creation requests for the same application now serialize against that
+  lock rather than racing to insert and having one lose to a constraint.
 - **One shared validation-rule source.** Interview field rules
   (`interview_type`, `scheduled_at`, `meeting_link`, `location`, etc.) live
   in exactly one place —
@@ -420,22 +442,45 @@ encoding assessment-specific detail into `Application.status`:
   `AssessmentService::ALLOWED_SOURCE_STATUSES` still accepts it as a
   *source* status so a legacy application stuck in that state with no real
   Assessment can still receive one. No code path writes it anymore.
-- **`in_assessment` is deliberately excluded from `ALLOWED_SOURCE_STATUSES`.**
-  By construction, an application only reaches `in_assessment` once a real
-  Assessment already exists, so treating it as a valid source for creating
-  *another* assessment would contradict the one-assessment-per-application
-  rule. The DB-level `assessments.application_id` unique constraint remains
-  the ultimate duplicate-assessment authority either way.
+- **`in_assessment` was excluded from `ALLOWED_SOURCE_STATUSES` before Phase 10A.3, and is included as of it.**
+  Before Phase 10A.3: by construction, an application only reached
+  `in_assessment` once a real (and, at the time, *only ever one possible*)
+  Assessment already existed, so treating it as a valid source for creating
+  *another* assessment would have contradicted the one-assessment-per-
+  application rule; the DB-level `assessments.application_id` unique
+  constraint was the ultimate duplicate-assessment authority regardless.
+  **As of Phase 10A.3**, `in_assessment` can also legitimately mean "the
+  evaluation chain is ongoing, but the most recent Assessment has already
+  been finalized" — exactly the state a completed Quiz leaves behind before
+  "Advance to Interview" — so excluding it would have blocked that entirely
+  new capability. Allowing it here is safe specifically because the
+  active-Assessment check (see above) now runs first and independently
+  blocks the one case that would actually be wrong (an `in_assessment`
+  application whose most recent Assessment is still active) with its own
+  409 — this list no longer needs to carry that responsibility alone. See
+  "Assessment History Architecture (Phase 10A.3)" below for the full
+  design.
 - **The generic status endpoint** (`PUT /api/organization/applications/{application}/status`,
   see docs/API.md section 5) no longer accepts `in_assessment` **or**
   `interview_scheduled` as input — only `reviewed, shortlisted, accepted,
   rejected`. This closes a prior gap where an organization could set
   `interview_scheduled` manually with no real Assessment behind it.
-- **Delete/revert** (`InterviewController::destroy()`) now reverts either
+- **Delete/revert** (`InterviewController::destroy()`) reverts either
   `in_assessment` or `interview_scheduled` back to `shortlisted` when the
-  application's only assessment is deleted; every other status
-  (`accepted`/`rejected`/`withdrawn`/...) is left untouched, unchanged from
-  before this phase.
+  application has **no Assessment left at all** after the deletion; every
+  other status (`accepted`/`rejected`/`withdrawn`/...) is left untouched,
+  unchanged from before this phase. **Phase 10A.3 revision**: before this
+  phase, "the application's only assessment is deleted" and "the
+  application has no Assessment left" were the same condition by
+  construction (at most one Assessment could ever exist). Now that Assessment
+  history is possible, they're not the same condition any more — deleting a
+  still-`scheduled` Interview that was itself an "Advance to Interview"
+  follow-up to an earlier *completed* Quiz must leave that completed Quiz's
+  history intact and the application still meaningfully `in_assessment`,
+  not incorrectly revert all the way back to `shortlisted`. The check was
+  updated from "was this the application's only assessment" (implicit,
+  always true) to an explicit re-query — `assessments()->exists()` — after
+  the delete.
 - **Migration**: `applications.status` gains `in_assessment` in-place (no
   existing row is rewritten); rollback moves any `in_assessment` row back
   to `shortlisted` before shrinking the enum, so it stays reversible without
@@ -443,6 +488,179 @@ encoding assessment-specific detail into `Application.status`:
   `database/migrations/2026_08_08_161938_add_in_assessment_status_to_applications_table.php`.
 - Quiz tables/models/controllers are still not implemented — this phase
   only prepares `Application.status` to be quiz-ready.
+
+---
+
+## Assessment History Architecture (Phase 10A.3)
+
+Enables the recruitment workflow this whole phase exists for: **Shortlisted
+→ Quiz → completed → Organization chooses Advance to Interview / Direct
+Offer / Reject.** "Advance to Interview" was architecturally impossible
+before this phase — `assessments.application_id` was unique, so an
+application could have at most one Assessment, ever, and turning a
+completed Quiz into a follow-up Interview would have meant either
+destructively deleting the completed Quiz/QuizAttempt or a genuine schema
+change. This phase is that schema change.
+
+**Audit finding — every place that assumed `Application hasOne Assessment`
+(done before writing any code, per this phase's own process):**
+
+| Assumption site | Nature of the assumption | Resolution |
+|---|---|---|
+| `assessments.application_id` unique constraint | The schema itself | New forward migration drops it, replaces it with a plain index |
+| `Application::assessment(): HasOne` | Model relationship | Redefined as `hasOne(...)->latestOfMany(['created_at', 'id'])` — same method name, same return type, now explicitly "the current/latest one" rather than "the only one" |
+| `AssessmentService::assertNoExistingAssessment()` | Checked *any* assessment existed | Replaced with `assertNoActiveAssessment()` — checks only non-final `status` |
+| `AssessmentService::ALLOWED_SOURCE_STATUSES` | Excluded `in_assessment` | `in_assessment` added — see the Phase 6B-0 section above for the full reasoning |
+| `AssessmentService`'s duplicate-conflict detection | A `QueryException` translation keyed on the unique constraint | Replaced with row-locking the `Application` (`lockForUpdate()`) inside the creation transaction |
+| `Organization\AssessmentController::showForApplication()` | `$application->assessment()->first()` — implicitly "the one" | Now `$application->assessments()->get()` — the full history, returned as an array |
+| `OfferService::assertEligibleForOffer()` | `$application->assessment()->first()` | **No code change needed** — since `assessment()` now means "latest" via `latestOfMany()`, this already-correct-looking line started doing the right thing (latest-Assessment eligibility) for free |
+| `Organization\InterviewController::destroy()` | Reverting to `shortlisted` whenever the deleted Assessment's application was `in_assessment` | Now re-checks `assessments()->exists()` after the delete, so a still-intact completed Quiz keeps the application at `in_assessment` |
+| `Application::interview(): HasOneThrough` | An unordered join would silently pick an arbitrary row if more than one Interview-type Assessment ever existed | Made explicitly deterministic (`orderByDesc('assessments.id')`) — was already correct in every real single-Assessment scenario, but relied on an invariant that no longer holds |
+| `Student\AssessmentController::index()` | No explicit ordering (didn't matter with one row) | `orderBy('created_at')->orderBy('id')` added for determinism |
+| Various tests (`AssessmentMigrationTest`, `AssessmentRelationshipTest`, `AssessmentCreationParityTest`, `OrganizationAssessmentTest`, `StoreAssessmentTest`, `StoreQuizAssessmentTest`) | Asserted the *opposite* of the new behavior, or used the old array/singular shape | Rewritten to assert the new contract; see each test file's own updated doc comments |
+
+**The two-relation model, not a rename:**
+
+```
+Application
+  assessment(): HasOne   -- hasOne(Assessment::class)->latestOfMany(['created_at', 'id'])
+                             the current/latest Assessment. Safe to .create()/.exists()
+                             exactly as before -- ofMany scoping only affects SELECTs.
+  assessments(): HasMany -- hasMany(Assessment::class)->orderBy('created_at')->orderBy('id')
+                             the full ordered history, oldest first.
+```
+
+This was chosen over renaming `assessment()` everywhere (which would have
+touched ~30 call sites across app code and tests) because `HasOne::create()`
+and `HasOne::exists()` don't consult the `ofMany` ordering scope at all —
+only `SELECT`s (`first()`, eager-loading) do. That means every existing
+`$application->assessment()->create([...])` and
+`$application->assessment()->exists()` call site kept working, unchanged,
+the instant `assessment()`'s definition changed — and for every application
+that still has exactly one Assessment (the overwhelming majority, always,
+for any application that hasn't been through "Advance to Interview"),
+`assessment()`'s behavior is bit-for-bit identical to before. Only the one
+call site that genuinely needed the *history*, not just the *latest* one
+(`Organization\AssessmentController::showForApplication()`), was changed to
+use the new `assessments()` relation instead.
+
+**The active-Assessment invariant, and why it isn't a database constraint:**
+"An application may have multiple historical Assessments, but at most one
+*active* (non-final) Assessment at a time" is enforced entirely in
+`AssessmentService`, not the schema. A conditional/partial unique index
+(unique only among `pending`/`scheduled`/`in_progress` rows) was considered
+and rejected — it isn't portably expressible across this project's two real
+connections (MySQL in dev, SQLite in tests) without a generated-column
+workaround, and this codebase already has a precedent for enforcing a
+similar "at most one active X" invariant via row-locking rather than a
+constraint (`OfferService::respondToOffer()`, which locks the `Offer` row
+before its own once-only transition). `AssessmentService::lockApplication()`
+locks the parent `Application` row for the duration of the creation
+transaction; two concurrent creation requests for the same application
+serialize against that lock, so the active-Assessment check and the
+subsequent insert can never race.
+
+**Quiz result release (Phase 10A.2) was substantially redesigned one phase later** — see "Decision-Aware Quiz Result Release Architecture (Phase 10A.4A)" below. At the time this phase shipped, the statement "nothing about Quiz result release changed" was accurate (an organization could advance to Interview before or after releasing the Quiz result and neither triggered the other); Phase 10A.4A is what first coupled the two.
+
+**Deliberately out of scope, this phase:** the full Interview UI redesign
+(Flutter reuses the existing Schedule Interview screen as-is for "Advance to
+Interview" — see docs/BUSINESS_RULES.md section 7a), and any change to
+Offer UI. Both remain exactly as Phase 6C-1/6C-4 left them.
+
+---
+
+## Decision-Aware Quiz Result Release Architecture (Phase 10A.4A)
+
+**The problem this phase fixes:** a manual E2E pass after Phase 10A.3 found that a Quiz result could release at its scheduled/immediate time even though the Organization hadn't yet decided what happens next — technically correct per Phase 10A.2's own rule, but an incomplete recruitment update for the Student (a bare pass/fail with no next step). The fix is architectural, not cosmetic: a Student-facing release now requires *both* the technical result *and* a ready Organization decision, computed by one shared readiness check every release path uses.
+
+**Reusing the Phase 10A.3 self-referencing schema, in the other direction.** Phase 10A.3 added Assessment history by making `assessments.application_id` non-unique. Phase 10A.4A adds two nullable self-referencing foreign keys on the same table, both `nullOnDelete()`, in one new forward migration:
+
+```
+Assessment
+  next_action_assessment_id -> assessments.id   (child: this Quiz's staged Interview, if any)
+  origin_assessment_id      -> assessments.id   (parent: set on that staged Interview itself)
+```
+
+The two columns are inverses of the same relationship, stored on both ends — `next_action_assessment_id` lets the Quiz side answer "what did I stage?" in one column read (no join needed to render the Organization's Next Step panel), while `origin_assessment_id` lets the *child* Interview answer "am I still waiting on my origin Quiz's release?" without knowing which Quiz staged it. Both are needed because the Student-visibility gate (below) is evaluated from the child's own row.
+
+**The Student-visibility gate is derived, never stored.** `Assessment::isPendingDecisionRelease(): bool` is computed as `origin_assessment_id !== null && ! originAssessment->isResultReleased()` — not a separate boolean column kept in sync by hand. This means a staged Interview Assessment automatically becomes Student-visible the instant its origin Quiz's `result_released_at` is set, with zero additional writes to the child record and zero risk of the two ever disagreeing. The same predicate (inverted, via a `whereHas`/`whereNull` pair) filters `Student\AssessmentController::index()`, `Student\InterviewController::index()`, and the Student dashboard's `total_interviews` count identically — one pattern, three call sites, not three separate hand-written gates that could drift.
+
+**Staging asymmetry between Interview and Offer is deliberate, not an inconsistency.** Interview: the real follow-up `Assessment` + `Interview` rows are created immediately at staging time (reusing `AssessmentService::createInterviewAssessment()` verbatim, with an added optional `$originAssessmentId` param that both stamps `origin_assessment_id` and suppresses the normal "interview scheduled" notification) — because the Interview flow already has real validation, real scheduling-conflict/active-assessment checks, and a real row is exactly what "Organization can see it internally" (an explicit requirement) needs. Offer: nothing real is created at staging time at all — the validated terms are stored as JSON on `next_action_data`, and the real `Offer` row is created for the first time at release by calling `OfferService::sendOffer()` completely unchanged. This is strictly safer than any half-created/flagged-hidden Offer row: there is nothing to leak early, by construction, and zero risk of the staged and released Offer logic ever diverging, since they're the same code path.
+
+**One consequence of the Interview asymmetry: a staged Interview counts as "active."** Because it's a real `status=scheduled` Assessment, the existing active-assessment invariant (Phase 10A.3) sees it exactly like any other in-progress Assessment. Switching the decision away from Interview (to Offer/Reject, or re-staging Interview with corrected details) must therefore explicitly discard the abandoned staged Interview first (`Organization\QuizController::discardStaleInterviewDecision()`, a straightforward `Assessment::whereKey(...)->delete()` that cascades to the `Interview` row via the same DB-level foreign key the direct interview-delete endpoint already relies on) — otherwise the abandoned row would stay active forever and permanently block this application from ever getting a new Assessment, despite never having been released or seen by the Student. This was caught and fixed during this phase's own audit, not left as a known gap.
+
+**`QuizResultReleaseService`'s three-tier structure is the single concurrency/idempotency authority.** All four release triggers (Student submit, an Organization decision-completion call, the scheduled `ReleaseQuizResultJob`, and the explicit manual-release endpoint) funnel through the same small surface:
+- `isReadyToRelease()` — mode-agnostic: graded, decision ready, not already released. The one readiness predicate everything else builds on.
+- `attemptRelease()` — mode/timing-aware; the one method implementing all three `result_release_mode` semantics via a single `match`, used by submit, decision-completion, and the job.
+- `releaseManually()` — bypasses timing but still requires readiness; used only by the explicit organization endpoint.
+- `release()` (private) — the *only* place `result_released_at` is ever written or a release communication ever dispatched. Re-locks the Assessment row (`lockForUpdate()`) inside its own `DB::transaction()` and re-checks readiness before writing anything. This is what makes a delayed job racing an Organization's decision-completion request, a double-clicked Release button, or a retried queue job all safe without any race-specific code elsewhere: whichever caller's transaction commits first wins, and every later caller's re-check inside the lock finds "already released" and silently no-ops.
+
+**One coherent communication per release** is a direct consequence of `release()` being the single dispatch point: it `match`es on `next_action` exactly once (`interview` → one new combined notification/email; `offer` → the existing, unmodified `OfferService::sendOffer()` and its own existing notification/email; `reject` → the existing rejection transition and its own existing notification/email), so there is structurally no way for two different code paths to both decide to notify the Student about the same release.
+
+**The forgotten-decision reminder reuses the exact same lock-and-recheck pattern**, just for a different write: `sendDecisionReminder()` locks the Assessment, re-checks that it's still unreleased and the reminder hasn't already been sent (`decision_reminder_sent_at`), and only then creates the Organization's one "Decision Required" notification — so a retried scheduled job can never send the reminder twice, the same guarantee `release()` gives the Student-facing communications.
+
+---
+
+## Shared Quiz Template Architecture (Phase 10A.4B)
+
+**The problem this phase fixes:** a Quiz was always authored per-candidate. If an Opportunity received 50 applicants, the Organization would author the identical quiz 50 separate times. The fix lets ONE `Quiz` row be authored once for an Opportunity and referenced by every candidate's own Assessment, while candidate score/result/decision/release stay exactly as isolated as they were before this phase.
+
+**Two mutually exclusive Quiz shapes, deliberately never unified into one.** The audit before writing any code (per this phase's own process) considered unifying legacy and shared quizzes onto one FK direction (backfilling `quizzes.assessment_id` into a new `assessments.quiz_id` for every historical row too, so `Assessment::quiz()` could be one clean `belongsTo`). That was rejected: it would have touched `AssessmentService::createQuizAssessment()` — the heavily-tested, currently-working ad-hoc creation path (~275 backend + ~350 Flutter test methods depend on its current shape, per this phase's own audit) — for a purely cosmetic long-term win, and Eloquent cannot safely express "this relation is `belongsTo` for some rows and `hasOne` for others" without risking a wrong batched query under eager-loading across a heterogeneous collection. The chosen design instead adds two independent, purely additive columns:
+
+```
+quizzes.opportunity_id  -> opportunities.id  (nullable, unique)   -- set only on a shared template
+quizzes.assessment_id   -> assessments.id    (now nullable, was required+unique) -- unchanged for every legacy row; never written again for anything new after this phase
+assessments.quiz_id     -> quizzes.id        (nullable)           -- set only when an Assessment *references* a shared template
+```
+
+A Quiz row is always exactly one of the two shapes; never both, never neither. The legacy ad-hoc flow (`AssessmentService::createQuizAssessment()`, `Assessment::quiz(): HasOne`) is **completely untouched** — zero code changes, zero test rewrites needed for it. The new shared-template flow (`AssessmentService::advanceToSharedQuiz()`, `Assessment::sharedQuiz(): BelongsTo`) is purely additive. `Assessment::resolvedQuiz(): ?Quiz` (a plain method, not a relation) picks whichever the Assessment actually uses; `Assessment::withResolvedQuizRelation()` normalizes the result onto the `quiz` relation itself via `setRelation()` before JSON serialization, so **every existing `data.quiz` response shape, and every existing Flutter parsing of it, stays byte-for-byte identical regardless of which shape produced it** — no Flutter-side branching was needed to render a shared-template Assessment's quiz.
+
+**`QuizAttempt` needed zero schema change.** It was already unique on `(quiz_id, application_id)`, not `(assessment_id, application_id)` — this table was already correctly shaped for many candidates sharing one Quiz row, a fact confirmed by audit before any code was written, not assumed.
+
+**`Student\QuizController` required the only genuinely invasive change.** `start()`/`submit()`/`show()`/`ownedApplicationFor()` previously resolved "the assessment for this quiz" via the unconditional assumption `quiz->assessment` (a single row). That assumption is only true for a legacy Quiz; a shared template has *many* candidates' Assessments referencing it. These methods now resolve "this specific candidate's own Assessment for this Quiz" via a targeted query (`Assessment::where('quiz_id', ...)->where('application_id', ...)`) for a shared template, falling back to the original `quiz->assessment` lookup for a legacy Quiz — branching on `quiz->opportunity_id !== null`. This is the one place the two shapes could not stay entirely decoupled, because Student quiz-taking is inherently "one Quiz, many candidates" once sharing exists.
+
+**Candidate isolation on a shared Quiz is enforced at two layers.** `QuizAttempt`'s existing unique constraint and the query-based ownership resolution above give each candidate their own attempt/score/answers. Separately, the *Organization's* single-candidate views (`GET .../assessments/{assessment}/quiz`, `GET .../assessments/{assessment}`) must narrow a shared Quiz's `attempts()` relation (which spans every candidate) down to the one Assessment's own `application_id` before returning it — `Assessment::withResolvedQuizRelation()` does this by construction (always re-fetches with a scoped `attempts` filter, never trusts a blanket eager-load), closing what would otherwise be a real cross-candidate data leak in a single-candidate view.
+
+**Candidate advancement is dispatch-timing-sensitive for the scheduled-release job.** Before this phase, `ReleaseQuizResultJob` was dispatched once per Quiz, at publish time, keyed by `quiz->id` — correct only because one Quiz always had exactly one Assessment then. A shared template breaks that: at template-publish time, zero candidate Assessments exist yet (they're created later, individually, as each candidate is advanced). The job is now keyed by `assessment_id`, not `quiz_id`, and dispatch moves to `AssessmentService::advanceToSharedQuiz()` for the shared path (still at `publish()` time for the legacy path, where the Assessment already exists). This is a real behavioral change to the job's contract, not just a schema-following rename — see `ReleaseQuizResultJob`'s own doc comment.
+
+**Ownership resolution branches the same way for question authoring.** `Organization\QuizController::ownsQuiz()` — used unchanged by every existing question CRUD endpoint — now resolves ownership through `quiz.opportunity.organization_id` for a template, `quiz.assessment.application.opportunity.organization_id` for legacy. This is the *only* change needed for the entire existing question-authoring surface (create/update/delete question, and the draft-only immutability guard) to already work correctly against a template Quiz id, with zero other code changes — a direct payoff of keeping question CRUD purely `quiz.id`-keyed from the start (true even before this phase).
+
+**Deliberately out of scope, this phase:** a code compiler/execution sandbox, AI essay auto-grading, a general assessment-workflow builder, random question banks, automatic bulk Interview decisions (the Quiz Results dashboard surfaces every candidate's state in one place, but each decision is still made individually through the existing real endpoints), and any Interview/Offer/Admin UI redesign.
+
+---
+
+## Candidate Availability Window Architecture (Phase 10A.4B addendum)
+
+**The problem this addendum fixes:** a shared Quiz template is authored once, but candidates are advanced to it at different moments. A single fixed availability window on the template would be unfair (a later-advanced candidate gets less notice); per-candidate manual scheduling would defeat the point of sharing a template at all. The fix splits the concern in two: a **policy**, configured once on the shared Quiz, and a **schedule**, computed independently for each candidate the moment they're advanced.
+
+**Policy lives on the Quiz; the computed schedule lives on the Assessment — deliberately never the reverse.** `quizzes.availability_delay_days`/`availability_time`/`submission_window_hours` (all nullable — `null` on a legacy or no-policy Quiz means "no gating" wherever read) describe the *rule*; `assessments.available_at`/`due_at` (also nullable) are each candidate's own *frozen result* of applying that rule once, at `AssessmentService::advanceToSharedQuiz()` time. Storing the computed dates on the shared Quiz itself was explicitly considered and rejected during this addendum's own pre-implementation audit — it would force every candidate to share one instant regardless of when they were actually advanced, defeating the entire point of a per-candidate window.
+
+```
+quizzes.availability_delay_days     -- policy: days after assignment the window opens
+quizzes.availability_time           -- policy: time-of-day it opens at ("H:i", deliberately uncast — see below)
+quizzes.submission_window_hours     -- policy: how many hours the candidate then has
+
+assessments.available_at            -- frozen result: this candidate's own window opens
+assessments.due_at                  -- frozen result: this candidate's own submission deadline
+```
+
+**Calculation is a deterministic overwrite, not an addition.** `AssessmentService::calculateAvailabilityWindow()` computes `available_at = assignedAt->copy()->addDays(delayDays)->setTimeFromTimeString(availabilityTime)` — `setTimeFromTimeString` *replaces* the time-of-day component rather than adding a duration, matching the product's actual intent ("opens at 10am on day N," not "opens N days and some fractional-day offset later"). `due_at = available_at->copy()->addHours(submissionWindowHours)`. Both fall back to `[assignedAt, null]` (immediate, no deadline) if the shared Quiz's policy fields are somehow null — defensive only, since `StoreOpportunityQuizRequest` now requires all three for every template.
+
+**`availability_time` is deliberately left uncast** (no Laravel `datetime`/`time` cast on the `Quiz` model) — returned as a raw `"HH:MM:SS"` string. Casting it would force Carbon to attach a fake reference date to a value that is genuinely date-independent (it's a policy about time-of-day, reused across arbitrary future assignment dates), which both complicates the cast and buys nothing `setTimeFromTimeString()` doesn't already handle directly from the raw string.
+
+**Timezone: no second convention introduced.** The addendum's own pre-implementation audit (its explicit first requirement) confirmed `config('app.timezone') === 'UTC'`, no custom `serializeDate()` override anywhere in the app, and that Flutter's `formatDate()`/`formatTime()` already render raw UTC values as literal wall-clock numbers with zero `.toLocal()` conversion — a deliberate existing simplicity convention. Every new date this addendum introduces follows that same convention unchanged; introducing per-user timezone conversion was explicitly out of scope.
+
+**Exposing `available_at`/`due_at` to the Student without a Quiz schema change.** `Student\QuizController::show()` (and, for the same reason, the generic `Student\AssessmentController::index()`/`show()`, which also nest `quiz.questions`) attaches `available_at`/`due_at` as *response-shaping extras* — `$quiz->available_at = $assessment->available_at` — rather than adding real columns to `Quiz`. This works because these values are genuinely per-candidate, not per-Quiz; attaching them to the serialized response object (via Eloquent's ordinary dynamic-attribute mechanism, the same "virtual attribute for response shaping" pattern `QuizModel.assessmentStatus` already established in the base phase) keeps the client-facing shape convenient (one place to read the schedule) without implying these are real `Quiz` columns.
+
+**Two independent enforcement layers, matching the addendum's explicit security requirement that a disabled Flutter button is not sufficient.** `Assessment::isUpcoming()`/`isPastDue()`/`isAvailableNow()` are the single source of truth both `Student\QuizController::start()` (rejects before `available_at`, after `due_at`) and `::submit()` (effective cutoff = `min(started_at + time_limit_minutes, due_at)`, mirroring the addendum's own worked example) independently re-check server-side on every request — never trusting whatever state the Flutter client believes it's in. `::show()` additionally withholds `questions` entirely (an empty array) while a window is upcoming, so no endpoint that nests `quiz.questions` can leak question text ahead of the real availability moment.
+
+**No automatic outcome on a missed deadline.** `isPastDue()`/`isUpcoming()` are purely descriptive; nothing in this addendum writes `assessment.result`, transitions `application.status`, or otherwise invents a decision when a candidate's window closes unused. The existing decision-and-release machinery (Phase 10A.4A) remains the only place any of that happens, and only ever in response to a real Organization action.
+
+**A derived, non-stored timing label for Organization views.** `Assessment::quizTimingStatus()` computes one of `upcoming`/`available`/`in_progress`/`submitted`/`deadline_passed` fresh on every request, from `available_at`/`due_at` plus the candidate's own `QuizAttempt` (or a raw attempt row already fetched by the caller, avoiding N+1 on the Results dashboard) — deliberately never a stored enum column, matching this addendum's own explicit "don't create unnecessary permanent enums" instruction.
+
+**Backward compatibility follows the identical pattern the base phase already established for the two Quiz shapes.** Every pre-addendum Assessment has `available_at`/`due_at` both `null`; every `isUpcoming()`/`isPastDue()`/`isAvailableNow()` check treats `null` as "no gating" by construction, so a legacy Assessment's behavior is completely unchanged with zero backfill and zero special-casing at any call site.
+
+**Deliberately out of scope, this addendum:** retakes, a deadline-extension UI, automatic rejection/failure on a missed deadline, and any change to the Phase 10A.4A decision/release architecture — availability/deadline and result release are, and remain, two entirely independent concerns that happen to both live on `Assessment`.
 
 ---
 
@@ -2294,6 +2512,325 @@ retroactive changes to pre-existing Invitations.
 
 ---
 
+## Talent Directory + Opportunity Recommended Candidates (Phase O8.1)
+
+**Problem**: Candidate Search (Phase 8B-3) conflated two different jobs
+behind one screen — general profile discovery, and deciding who to invite
+to one specific Opportunity — with no ranking, and an Invite flow that
+made the Organization pick the Opportunity manually after already having
+picked the candidate. This phase splits the UI along that seam without
+touching the underlying `applications`/`invitations` pipeline: Candidate
+Search stays as the "Talent Directory" (pure browsing, Invite action
+removed from its UI), and a new endpoint adds real, ranked, per-Opportunity
+recommendations with Invite-in-context.
+
+**`MatchingService` extraction, not a rewrite.** `analyze(Application
+$application)` only ever read `$application->opportunity` and
+`$application->studentProfile` — never any Application-specific column
+(`id`, `status`, etc.) — confirmed by a full read before touching it. This
+made the refactor mechanical and behavior-preserving: `analyzeSkills()`,
+`analyzeField()`, and `analyzeExperience()` all changed signature from
+`(Application $application)` to `(StudentProfile $studentProfile,
+Opportunity $opportunity)`, `analyze()` became a thin wrapper that
+loads-missing the two relations and delegates to a new private
+`score(StudentProfile, Opportunity)`, and a new public
+`scoreCandidate(StudentProfile $studentProfile, Opportunity $opportunity)`
+calls the same `score()` directly — no `Application` required. The full
+pre-existing 22-test `MatchingBehaviorTest` suite passed unchanged after
+the refactor, proving the formula (Skills 60/Field 20/Experience 20,
+proportional redistribution, no fake placeholder) is identical for both
+call paths. **There is one scoring implementation, reused by both**, per
+the explicit constraint that this phase must never insert a temporary
+Application row or fork a second, competing algorithm to calculate a
+recommendation score.
+
+**New endpoint, no new tables.** `Organization\OpportunityRecommendationController::index()`
+(`GET /organization/opportunities/{opportunity}/recommended-candidates`)
+is a pure read: ownership-check the Opportunity (404 pattern, matching
+every other Organization-owned-resource endpoint) → eager-load
+`opportunitySkills.skill` once → query active `StudentProfile`s with
+`studentSkills.skill` eager-loaded once (avoiding the N+1 that would
+otherwise come from each candidate's own `scoreCandidate()` call) → filter
+through `OpportunityEligibilityService::isStudentEligible()` (the same
+gate section 5b already established, reused verbatim, not
+reimplemented) → score each survivor via `MatchingService::scoreCandidate()`
+→ look up this Opportunity's Applications and Invitations in two total
+queries (`keyBy('student_id')`), not one query per candidate → sort by
+`match_score` descending, `id` ascending for a deterministic tie-break.
+Nothing in this path calls `Application::create()`, `Invitation::create()`,
+or mutates any Student/Opportunity attribute — proven directly in
+`tests/Feature/Candidates/OpportunityRecommendationTest.php` by comparing
+`->fresh()->getAttributes()` before and after the request.
+
+**Invite-from-Recommended-Candidates reuses the existing Invitation
+endpoint unchanged.** There is no second "send an invitation" code path —
+the Flutter `InviteToApplySheet` (replacing the old opportunity-picker
+`InviteBottomSheet` for this context) calls the same
+`POST /organization/invitations` as the Talent Directory always did, just
+with the Opportunity already known from screen context instead of asked
+for via a picker dialog. Every existing duplicate/eligibility/ownership
+rule from Phase 8B-3/8B-3.2 applies identically; this phase adds no new
+Invitation business rule.
+
+**Access control mirrors the rest of the Organization-owned-resource
+surface, deliberately not inventing a new pattern**: `role:organization`
+middleware, then an ownership check that 404s (never 403s) for another
+organization's Opportunity — the exact convention `CandidateController`'s
+own `opportunity_id` filter and every Opportunity-scoped Organization
+route already use. A Student hitting this route is rejected by the
+role middleware before any Opportunity lookup runs.
+
+**Flutter split**: `CandidateSearchScreen` (kept as the Talent Directory)
+lost its Invite button, its opportunity-picker trigger, and the now-fully
+orphaned `InviteBottomSheet` (deleted — grep confirmed it had exactly one
+caller, this screen) — replaced with a "View Profile" action into a new,
+read-only `OrganizationCandidateProfileScreen`. A new
+`RecommendedCandidateModel` (deliberately separate from `CandidateModel`,
+not an extension of it — it carries match-score/factor data and
+this-Opportunity relationship state that only ever exists in a
+recommendations context) and `OpportunityRecommendationsProvider` back a
+new `OrganizationRecommendedCandidatesScreen`, reached from a new
+"Recommended Candidates" entry point on Opportunity Details. No existing
+route, provider, or screen for Quiz/Interview/Offer/Notifications/Skills/
+Education Verification was touched.
+
+**Scope confirmation**: no ML model training, no new AI provider, no
+automatic invitation of top candidates, no automatic shortlist, no bulk
+Invite, no recruiter messaging, and no change to the Application pipeline,
+`MatchingService`'s formula/weights, `OpportunityEligibilityService`'s
+rule, or any pre-existing Candidate Search/Invitation test's expected
+behavior — every regression test from Phase 8B-3/8B-3.2 continued to pass
+unchanged.
+
+---
+
+## Canonical Location Catalog & Location Eligibility (Phase O8.2)
+
+**Problem**: location existed only as free text — a Student had no
+location field at all, and an Opportunity's `location` was a plain
+string. "Nablus", "Nablus, Palestine", and "نابلس" could never be
+recognized as the same place, and nothing let Work Mode meaningfully
+gate location relevance. This phase adds a canonical, ID-based Location
+Catalog and reuses this app's own established eligibility-gate pattern
+(section 5b's major eligibility) rather than inventing string-matching
+heuristics.
+
+**Schema: one new lookup table, one new pivot, one new nullable FK —
+nothing destructive.** `locations` (`id`, `canonical_name` unique) is the
+fixed catalog, seeded via `BaselineLocationSeeder` (mirrors
+`BaselineSkillSeeder`'s own `firstOrCreate`-based idempotency exactly).
+`student_available_locations` (`student_profile_id`, `location_id`,
+`unique(student_profile_id, location_id)` under an explicit short
+constraint name — the same MySQL 64-char identifier limit already
+documented for `opp_eligible_majors_unique` hit this table too) is a
+plain many-to-many pivot. `opportunities.location_id` (nullable,
+`nullOnDelete`) is purely additive: the pre-existing free-text `location`
+column is never touched or backfilled for any existing row — a forward
+migration, not a rewrite. `Organization\OpportunityController::mirrorLocationName()`
+keeps `location` in sync with `location_id`'s canonical name whenever a
+*new or edited* Opportunity sets one, so every existing consumer of the
+plain-text field (Flutter display, in particular) keeps working
+unchanged for both historical and new Opportunities without needing to
+know about `location_id` at all. `location_id` is deliberately **not**
+`required_if:work_mode,onsite,hybrid` at the validation layer — making it
+required would force every existing On-site/Hybrid Opportunity to gain a
+canonical location the instant an Organization edits it for any unrelated
+reason, which is a bigger, more disruptive change than this phase asked
+for; the Flutter form nudges it as effectively required client-side
+instead (see below).
+
+**`Opportunity::locationRecord()`, not `location()`.** The relation to
+`Location` is deliberately named `locationRecord`, exactly mirroring why
+`eligibleMajorRecords()` isn't named `eligibleMajors()` (Phase 8B-3.2) —
+the legacy string column already occupies the `location` attribute name,
+and Eloquent studly-cases a relation and an `$appends` accessor to the
+same PHP method-resolution key. Unlike `eligibleMajorRecords`, though,
+`locationRecord` needed no `$hidden`/derived-accessor dance at all:
+`canonical_name` has no internal-only field to hide (nothing like
+`normalized_major_name`), so it's simply never eager-loaded in a response
+path that would leak it — `Organization\OpportunityRecommendationController`
+is the one place it's loaded, and only to hand-assemble the two safe
+fields (`work_mode`, `location.canonical_name`) the response actually
+needs.
+
+**Location eligibility is a second, independent method — deliberately
+not folded into `isStudentEligible()`.** `OpportunityEligibilityService::isLocationEligible()`
+is new, separate from the major-eligibility method it sits beside, and is
+called from exactly one place:
+`Organization\OpportunityRecommendationController`. This was a deliberate
+scope decision, not an oversight (see docs/BUSINESS_RULES.md section
+5c for the full reasoning): folding location into the same gate that
+already blocks Apply and Invitation creation would have made every
+existing Student — none of whom have any `available_location_ids`
+configured yet, since the field is brand new — immediately unable to
+apply to or be invited to any On-site/Hybrid Opportunity. Being excluded
+from a *recommendation* list carries no equivalent risk (Candidate Search
+and direct Apply remain unaffected), so the location gate is scoped
+narrowly to where introducing it is safe. The rule itself: Remote never
+consults location at all; On-site/Hybrid with a real `location_id`
+requires it to appear in the Student's own available locations; On-site/
+Hybrid with no `location_id` set is treated as unrestricted (mirrors rule
+B of major eligibility); a Student with zero available locations is
+excluded, never guessed into either outcome.
+
+**Response shape change on Recommended Candidates (Phase O8.2) — the
+first breaking change to that endpoint since Phase O8.1 shipped it.**
+`GET .../recommended-candidates`'s `data` changed from a bare array to
+`{opportunity: {work_mode, location}, candidates: [...]}`. This was
+judged worth doing (rather than smuggling the context in elsewhere)
+because the Flutter Recommended Candidates screen needs `work_mode` to
+render a *truthful* transparency explanation — the addendum's explicit
+requirement that the UI never claim location was considered for a Remote
+Opportunity. The backend already loads the Opportunity for the ownership
+check, so surfacing two extra hand-assembled fields alongside the
+existing ranked array was the natural, minimal-risk place to put this,
+rather than relying on a client-side `extra` value that could be stale or
+missing on a direct link. Both `CandidateRepository.getRecommendedCandidates()`
+(Flutter) and every test asserting on `data` were updated in the same
+phase — there was no intermediate state where the two disagreed.
+
+**Required Skills reuse the existing canonical Skill Catalog and
+matching formula — no second scoring system.** `opportunity_skills.skill_id`
+already referenced `skills.id`; there was never a free-text Skill name on
+an Opportunity, so this phase's actual gap was UI-only — Create/Edit
+Opportunity had no Required Skills control at all before this phase (a
+grep confirmed zero Flutter callers of `OpportunitySkillController`'s
+existing `index`/`store`/`destroy` endpoints). Rather than wiring N
+individual add/remove calls into the form, a new `PUT .../opportunities/{opportunity}/skills`
+sync endpoint (`OpportunitySkillController::sync()`) replaces the whole
+Required/Preferred set in one atomic delete-then-reinsert call — the same
+"sync the set cleanly" convention `eligible_majors` already established.
+A new `GET /organization/skills/catalog` mirrors the Student's own
+`GET /student/skills/catalog` so the multi-select offers identical
+canonical IDs. `MatchingService` itself was not touched — `Organization\OpportunityRecommendationController`
+already called `scoreCandidate()`, which already weighted Required skills
+double over Preferred (Phase 8A-2); this phase only makes that
+pre-existing weighting reachable from the Organization's own UI for the
+first time.
+
+**Flutter**: a new `LocationModel` + `LocationRepository` + a shared
+`LocationCatalogProvider` (mirrors `StudentSkillProvider`'s own
+cached-catalog-loading shape) back two new pieces of UI — a multi-select
+of `FilterChip`s on Student Profile Edit ("Available Work Locations") and
+a single-select `DropdownButtonFormField` on Create/Edit Opportunity,
+disabled with a real explanatory message (not just greyed out) for a
+Remote Opportunity. `OrganizationOpportunitiesProvider` gained the
+Required Skills catalog/sync methods directly (no separate provider —
+this state is Opportunity-form-scoped, unlike locations which are shared
+across two unrelated features). `OrganizationRecommendedCandidatesScreen`
+gained a `_MatchingExplanation` widget reading the provider's new
+`workMode`/`locationName` fields to render the two-line transparency copy
+the addendum specified verbatim, adapted truthfully per Opportunity
+configuration.
+
+**Scope confirmation**: no fuzzy/string-similarity location matching (the
+canonical-ID model resolves the "Nablus" ambiguity by construction, so
+none was needed), no location-based scoring/percentage inside
+`match_score` (location is a filter, never a scoring factor), no change
+to Apply or Invitation creation's eligibility rules, no admin CRUD UI for
+the Location Catalog (seeded only, matching how `BaselineSkillSeeder`
+originally shipped before any Admin Skill management UI existed), and no
+retroactive rewrite of any historical Opportunity's free-text `location`.
+
+---
+
+## Student Location Profile Patch: Current Location + Multiple Available Work Locations
+
+**Problem**: the previous phase (Phase O8.2) gave a Student multiple
+Available Work Locations, but no way to record where they actually live.
+The two are genuinely different facts — a Student may live in Jenin but
+be willing to work in Nablus and Ramallah — and conflating them (e.g.
+treating "lives in" as "willing to work in") would have been actively
+misleading. This patch adds the missing "Current Location" as a second,
+independent field, and wires both into every place a Student's profile
+is created, edited, and displayed.
+
+**Schema: one nullable FK, no new table.** `student_profiles.current_location_id`
+(nullable, `nullOnDelete`, references `locations.id`) is purely additive —
+an existing Student profile has `current_location_id = null` and remains
+fully valid; nothing about login, profile loading, or any other feature
+changes for them. No new table was needed (unlike Available Work
+Locations, which is genuinely many-to-many and needed the
+`student_available_locations` pivot) — Current Location is single-valued,
+so a plain FK column on `student_profiles` is the correct, minimal shape.
+
+**`StudentProfile::currentLocation(): BelongsTo`, no relation-naming
+collision to work around.** Unlike `Opportunity::locationRecord()` (which
+had to avoid colliding with the legacy free-text `location` string
+attribute — see the Phase O8.2 section above), `current_location_id` has
+no pre-existing `current_location` attribute to collide with, so the
+relation is named directly and plainly.
+
+**Both Current Location and Available Work Locations are now settable at
+three points, not one.** Phase O8.2 only wired Available Work Locations
+into Edit Profile. This patch adds both fields to:
+- **Student Profile Setup** (`POST /student/profile`, the Step 2
+  onboarding screen reached right after the minimal Step 1 account
+  form) — a new "Work Location Preferences" `AppCard` section, entirely
+  optional, so a Student can finish onboarding without configuring
+  either and add them later.
+- **Edit Profile** (`PUT /student/profile`, already handling Available
+  Work Locations) — gained the Current Location dropdown alongside it,
+  under the same renamed "Work Location Preferences" section header.
+- **`StudentProfileController::store()`** needed a genuine change here
+  (not just `update()`): it previously mass-assigned `$request->validated()`
+  directly with no pivot-sync step at all, since Available Work Locations
+  didn't exist at creation time before this patch. It now strips
+  `available_location_ids` the same way `update()` already does and syncs
+  it after `create()`, while `current_location_id` needs no special
+  handling — it's a plain fillable column, so ordinary mass assignment on
+  `create()` already covers it.
+
+**Deliberately kept off the minimal Step 1 account form.** Step 1 collects
+only name/email/password — the account-creation essentials. Location
+preferences are profile data, not account data, so they only ever appear
+starting at Step 2 (Profile Setup) — consistent with every other
+profile-only field (university, major, graduation year) already being
+Step-2-only, not Step-1.
+
+**Recommendation eligibility is entirely unaffected.** `OpportunityEligibilityService::isLocationEligible()`
+(Phase O8.2) already read `StudentProfile::availableLocations` exclusively
+— `current_location_id` is never consulted there, by design (see
+docs/BUSINESS_RULES.md section 5c). Adding Current Location required zero
+changes to `MatchingService`, the recommendation controller, or any
+eligibility test from the previous phase — all continued to pass
+unchanged, confirming the two concerns stayed genuinely decoupled.
+
+**Flutter: one new shared widget file, not a third copy of the same
+control.** `CurrentLocationField` and `AvailableLocationsField`
+(`work_location_fields.dart`) were extracted from what was previously a
+private `_LocationMultiSelect` living only inside
+`StudentProfileEditScreen`, so Student Profile Setup (onboarding) and Edit
+Profile share the exact same loading/error/empty handling and the exact
+same canonical-ID-only selection behavior — never two independently
+drifting implementations of "pick a location from the catalog."
+`StudentProfileModel` gained `currentLocation` (a nullable `LocationModel`,
+parsed from the new `current_location` response field) alongside the
+pre-existing `availableLocations`.
+
+**Student Profile display gained a "Work Preferences" section and a new
+Profile Readiness item.** Unlike `_ContactSection` (which renders nothing
+at all when phone/bio are both unset), the new `_WorkPreferencesSection`
+always renders — showing "Not specified" / "Work locations not added"
+truthfully rather than disappearing, since the point is for the Student
+to discover this data exists and can be configured. A new "Work locations
+added" `_ReadinessItem` (pending when `availableLocations` is empty, done
+otherwise) follows the same real-signal-not-fabricated-percentage
+convention every other readiness row already uses.
+
+**Scope confirmation**: no fuzzy/string-similarity location matching
+(the canonical-ID model already solved that in Phase O8.2, and Current
+Location never needed matching logic in the first place — it is purely
+informational), no change to `isLocationEligible()`'s existing rule or to
+which field it reads, no default/inferred location for an existing
+Student (never derived from university, phone, email, or nationality), no
+new theme system (both new sections render through the existing
+persisted `ThemeProvider`, exercised via each screen's pre-existing
+dark-mode/theme-toggle tests), and no change to the minimal Step 1
+account-registration form.
+
+---
+
 ## Interview Contact Details by Type (Phase Final-QA-1)
 
 **Root gap**: `interviews.meeting_link`/`interviews.location` already
@@ -2376,6 +2913,691 @@ eligible majors, Invitations, Application eligibility, `MatchingService`,
 architecture, Offer architecture, SMTP/queue configuration, role
 permissions, or general UI design. No pre-existing Interview rows were
 invalidated or backfilled.
+
+---
+
+## Matching Formula Audit & Unified Recommendation Score (Phase O8.2 audit)
+
+**Problem this closes**: a Recommended Candidates row could show `Major is
+eligible`, a partial Skills match, and still land on `0%` overall — with
+nothing in the response explaining why, making "Match" look like it might
+secretly mean "Skills Match" only, or like eligibility passing should have
+guaranteed a nonzero score.
+
+**Audit finding (this phase's actual work was the audit, not a rewrite)**:
+Recommended Candidates already called the exact same
+`MatchingService::scoreCandidate()` core Application Match Analysis uses
+(`OpportunityRecommendationController::index()`, wired since Phase O8.1 —
+see that section above). There was no second, simplified, skills-only
+formula anywhere in the codebase. The `0%` result was the real, correctly
+computed output of the genuine 60/20/20 formula (see "MatchingService v1.1"
+above): Skills scored `0` (the required skill was missing), Field/Major was
+`null`/unavailable (no `field_of_study` configured on the Opportunity, so
+its weight redistributed away rather than defaulting to anything), and
+Experience scored a genuine `0` (no `years_of_experience` on file against a
+real requirement) — a weighted average of two real zeros is `0`, correctly.
+**No weight was changed, no factor was added or removed, and no second
+formula was created.** The only real gap was transparency: the response's
+`match_breakdown` object (added in the Recommendation Accuracy Patch)
+exposed `major_eligibility` (the pre-ranking gate) but never the real,
+*scored* Field/Major or Experience factors — so there was no way to see
+*why* a major-eligible candidate still scored low.
+
+**Eligibility vs. score — the actual distinction that was under-explained**:
+- `OpportunityEligibilityService::isStudentEligible()` /
+  `isLocationEligible()` are gates. They decide whether a candidate is
+  scored/shown at all. `MatchingService` never reads either result and
+  never awards points for passing them.
+- `MatchingService::analyzeField()` is a genuinely different, already-
+  existing *scored* factor (worth 20 of 100): it compares `major` against
+  `field_of_study` — "how relevant is their academic field" — not "are
+  they allowed to apply". A candidate can pass the eligibility gate and
+  still have this factor be `0` (mismatched) or `null` (unavailable,
+  because `field_of_study` is optional and often simply not set — see
+  "Multi-Major Opportunity Eligibility" above on why `field_of_study` is
+  deliberately never an eligibility fallback).
+- These were already architecturally separate before this phase (see
+  Phase 8B-3.2's own note on this in docs/BUSINESS_RULES.md section 5b).
+  What was missing was surfacing the *second* one (the real score factor)
+  in the recommendation explanation, alongside the first (the gate).
+
+**The fix — `OpportunityRecommendationController`, purely additive**:
+`match_breakdown` gained `major_field_match` (`matched`/`not_matched`/
+`not_applicable`, a truthful label over the real `field_match_score` —
+`fieldFactorStatus()`) and `experience_match` (`full_match`/
+`partial_match`/`no_match`/`not_applicable`, over the real
+`experience_match_score` — `experienceFactorStatus()`), plus the raw
+`field_match_score`/`skills_match_score`/`experience_match_score` repeated
+inside the breakdown object so it is self-contained for the UI. Both
+classifier methods are pure presentation over values `MatchingService`
+already computed — neither method performs a new comparison or
+introduces a weight. `major_eligibility` is retained, now with an explicit
+doc comment on why it must never be conflated with `major_field_match`.
+
+**Null vs. zero (audited, not changed)**: `skills_match_score`/
+`field_match_score` were already correctly nullable (unavailable ≠ zero) —
+verified by pre-existing tests. `overall_match_score`/`match_score` can
+never genuinely be "unavailable" in the current architecture: `MatchingService`
+returns a real `0.0` fallback only when *literally nothing* is scoreable,
+and `experience_level` is a required, non-nullable Opportunity column, so
+the Experience factor is always scoreable — there is no code path today
+where the top-level Match is null. A `match_available` field was
+deliberately **not** added, since it would always be `true` today and adding
+one anyway would misleadingly imply a state the current formula cannot
+actually produce; this is documented rather than fabricated.
+
+**Application Match consistency**: `MatchingBehaviorTest`/the new
+`MatchingFormulaAuditTest` confirm Recommendation and Application Match
+Analysis produce byte-identical scores for the same Student/Opportunity
+pair when their real inputs (major, `studentSkills`, `field_of_study`,
+`experience_level`) are equal — because both call paths funnel through the
+one private `score()` method. The two CAN legitimately differ only if the
+underlying data changes between the two calls (e.g. the Student adds a
+skill, or the Organization edits the Opportunity's Required Skills) —
+never because of two different formulas.
+
+**Scope confirmation**: no change to `MatchingService`'s weights, formula,
+or any existing factor's mechanics; no fake `Application` created to
+compute a Recommendation score (unchanged since Phase O8.1); no change to
+`OpportunityEligibilityService`; no change to the Remote/On-site/Hybrid
+location rule (section 5c/9); Flutter's `MatchBreakdownModel` and the "Why
+X%?" expansion were extended additively (new fields, new lines), the
+existing card layout/collapsed state is unchanged.
+
+---
+
+## Opportunity Academic Matching Cleanup
+
+**Problem this closes**: a Recommended Candidates row could read "Major /
+Field: does not match this opportunity's field of study" for a candidate
+whose major was a genuine, exact entry in the Opportunity's own Eligible
+Majors list — because the Matching Formula Audit's `major_field_match`
+factor (above) compared `major` against the legacy free-text
+`opportunity.field_of_study`, an independent, unvalidated field that can
+contain anything (the reported case: `field_of_study = "ccc"`) regardless
+of what `eligible_majors` actually says. The eligibility gate
+(`major_eligibility: "eligible"`) was correctly passing, but the adjacent
+scored factor was contradicting it in the same response — confusing and,
+for a genuinely well-matched candidate, actively wrong.
+
+**Product decision: remove `field_of_study` from active product logic
+entirely, rather than repair the comparison.** Two repair options were
+considered and rejected: (a) compare `major` against `eligible_majors`
+instead of `field_of_study` inside the scoring factor, or (b) keep both
+signals but make eligibility win on conflict. Both were rejected for the
+same reason spelled out in this phase's own instructions: **every
+candidate reaching `MatchingService::score()` has already passed
+`OpportunityEligibilityService::isStudentEligible()`** — the real,
+canonical, `eligible_majors`-backed gate (section 5b). Rebuilding the
+scored factor on that same canonical data would make it a constant `100`
+whenever `eligible_majors` is configured (nothing left to differentiate
+between two already-eligible candidates) or have nothing to compare when
+it isn't — i.e. a disguised, double-counted restatement of a decision
+already made, not a genuine second signal. The instruction was explicit:
+*"Do NOT blindly double-count Major. Eligible Major is already an
+eligibility gate."* So the Field/Major **scoring** factor is removed
+outright, and `major_eligibility` (the real gate every listed candidate
+already passed) becomes the sole academic signal, both for eligibility
+(unchanged, section 5b) and for explanation (changed, see below).
+
+**`opportunities.field_of_study` itself is not dropped.** The migration/
+column, and every historical Opportunity's stored value, are left exactly
+as they were — this phase is a matching/UI cleanup, not a data migration.
+`Opportunity::$fillable` carries a new `@deprecated` doc comment marking
+the column legacy, and `eligibleMajorRecords()`'s own doc comment now
+states it is the sole authoritative academic signal. The one legitimate
+remaining reader of `field_of_study` is the entirely separate, unrelated
+Student-facing public "browse opportunities by field of study" search
+filter (`GET /api/opportunities?field_of_study=...`,
+`StudentOpportunitiesProvider.fieldOfStudy`,
+`opportunity_filter_sheet.dart`) — a keyword/discovery feature, not a
+matching input, and explicitly out of scope here; it was left completely
+untouched.
+
+**`MatchingService` v1.1 → v1.2**: `FIELD_WEIGHT`, `analyzeField()`,
+`normalizeForComparison()`, and `containsAsWholeSegment()` are deleted
+outright (not deprecated/dead code left in place). `score()` now computes
+only Skills (60) and Experience (20) and calls the same, unmodified
+`weightedAverage()` redistribution helper over just those two — so
+`overall = (skills*60 + experience*20) / 80` when both are scoreable,
+falling back to whichever single factor is scoreable (weight 60 or 20)
+exactly as the pre-existing redistribution logic already handled any
+other unscoreable factor, with no new branch added for this change.
+**Weight change, stated exactly**: v1.1 was Skills 60 / Field-Major 20 /
+Experience 20 (a 100-weight denominator when everything was scoreable);
+v1.2 is Skills 60 / Experience 20 (an 80-weight denominator). A candidate
+who is Skills-100/Experience-100 now scores `100` exactly as before
+(ratios are unaffected by the shared denominator canceling out); a
+candidate who was previously being pulled toward/away from 100 by the
+Field/Major factor's `100`/`0`/redistributed-away behavior now has one
+fewer term altogether — verified in `MatchingBehaviorTest`/
+`MatchingFormulaAuditTest` (see below) rather than left as an unverified
+claim.
+
+**`OpportunityRecommendationController`**: `match_breakdown` drops
+`major_field_match`/`field_match_score` entirely (`fieldFactorStatus()`,
+the classifier the Matching Formula Audit added, is deleted along with
+them) — the response no longer has either key at any level.
+`major_eligibility` is unchanged and remains the sole academic field in
+the breakdown. `experienceFactorStatus()`/`location_eligibility` are
+untouched. The Application Match Analysis endpoints
+(`POST/GET .../analyze`, `.../analysis`) lose `field_match_score` the same
+way, for the same reason — one shared `MatchingService::score()`
+implementation, one shared removal.
+
+**Flutter**: `OpportunityModel.fieldOfStudy` is deleted (the model no
+longer parses `field_of_study` from any Opportunity response at all —
+a legacy response that still includes the key simply has it ignored, not
+an error). `OpportunityRepository.createOpportunity()`/
+`updateOpportunity()`/`_buildPayload()` no longer accept or send
+`field_of_study` — Create/Edit Opportunity forms cannot write it even if
+a field for it existed, and no field for it exists any more:
+`OpportunityFormScreen` had its "Field of Study (optional)" input removed
+outright, and both the Organization and Student Opportunity Details
+screens dropped their Field of Study display row. `MatchBreakdownModel`
+loses `majorFieldMatch`/`fieldMatchScore`; the Recommended Candidates "Why
+X%?" expansion's first line changed from a Field/Major comparison to a
+flat "Major is eligible" positive fact sourced from `majorEligibility` —
+matching the backend's own re-framing of that field as a gate, never a
+score. `MatchAnalysisModel`/`RecommendedCandidateModel` lose
+`fieldMatchScore`, and the Application Details screen's factor grid drops
+its "Field / Major Match" row (`matchFactorLabels` no longer has a
+`'field'` entry) for the same reason — the backend simply stopped sending
+the field there is nothing left to render.
+
+**Eligible Major chip contrast fix (Organization Opportunity Details,
+`_RequirementsCard`)**: reported as "too dark / low contrast" in dark
+theme. Root cause, found by reading `AppColors`' light/dark token
+definitions: the chip used `AppStatusType.primary`
+(`AppColors.primaryContainer`/`AppColors.primaryDark`), whose dark-theme
+pair (`#1E3A5F` background / `#1E3A8A` foreground) is two near-identical
+dark navy blues — near-zero contrast — while its light-theme pair is fine.
+`AppStatusType.info` (`AppColors.infoBackground`/`AppColors.info`) has a
+genuinely contrast-safe pair in **both** themes (already proven correct on
+the Student-facing Eligible Majors chip, which was left unmodified as
+precedent). Fixed by switching only the Organization-side Eligible Major
+chip's `type` from `primary` to `info` — no hardcoded one-theme-only
+color, reusing the existing `StatusChip`/`AppStatusType` design system
+exactly as instructed. The adjacent Required Skill chip on the same card
+already used `info` and needed no change.
+
+**A known, deliberately out-of-scope finding**: `AppStatusType.primary`'s
+dark-theme contrast defect is systemic, not local to this one chip — it is
+used in 18+ other call sites app-wide (admin screens, application details,
+organization home, opportunity cards, etc.), and the Student-facing
+Opportunity Details screen's Required Skill chip has the identical
+unfixed issue. Fixing only the specifically reported chip (and its direct
+sibling on the same card) was a deliberate scope decision to avoid an
+unreviewed, untested blast radius across many unrelated screens — flagged
+here, and in this phase's own final report, rather than silently
+ignored or unilaterally fixed.
+
+**Scope confirmation**: Required Skills logic is completely unchanged
+(same canonical `opportunity_skills` relation, same `OpportunitySkillSyncService`);
+Remote/On-site/Hybrid location eligibility (section 5c/9) is unaffected;
+`eligible_majors`/`OpportunityEligibilityService::isStudentEligible()`
+(section 5b) is unaffected — this phase only removed a *scoring* factor
+that sat downstream of that already-passed gate; no `opportunities` table
+migration was run and no historical Opportunity's `field_of_study` value
+was touched, cleared, or backfilled.
+
+---
+
+## Recommendation Match: Major Must Contribute to Total Score (v1.3)
+
+**Problem this closes**: the Opportunity Academic Matching Cleanup (above)
+correctly removed the false-negative-prone `field_of_study` Field/Major
+factor, but its replacement -- a flat, unscored `major_eligibility:
+"eligible"` fact -- left a genuinely major-eligible candidate with zero
+matched Skills and zero Experience scoring a contradictory `0%`: "✓ Major
+is eligible" sitting right next to a `0%` "Match" the eligibility fact
+played no part in. Product decision: the percentage labeled "Match" must
+represent **total** candidate compatibility, of which academic fit is a
+genuine pillar, not a fact that vanishes from the number the instant it
+clears a gate.
+
+**Explicit, deliberate exception to the Cleanup's own reasoning -- not a
+reversal of its `field_of_study` finding.** The Cleanup's core finding
+still holds and is unchanged: `field_of_study` is unvalidated free text,
+independent of `eligible_majors`, and must never drive eligibility,
+scoring, or explanation. What changes is the "don't score Major at all"
+conclusion drawn from *that* finding. The instruction for this phase was
+explicit: audit the existing canonical formula, do not invent arbitrary
+weights, and do not blindly double-count Major as a fresh, unrelated
+concern -- rebuild it as a real, deliberate exception to the "a gate and
+its score must never overlap" principle, understanding exactly what that
+overlap means.
+
+**`MatchingService` v1.2 → v1.3**: a new private `analyzeMajor()` method
+and `MAJOR_WEIGHT = 20` constant. Weights: Skills 60 / Major 20 /
+Experience 20 (the same 60/20/20 split v1.1 had, but Major's *data
+source* is now canonical, not `field_of_study`) -- literally the "audit
+the existing formula, don't invent a new weight" instruction taken
+seriously: 20 is not picked arbitrarily; it is the weight the Cleanup
+zeroed out, restored to its own factor's slot now that a real,
+non-double-counting replacement exists. `analyzeMajor()` compares
+`studentProfile.major` against `opportunity.eligibleMajorRecords`
+(reusing `MajorNormalizer`, the exact same normalization
+`OpportunityEligibilityService::isStudentEligible()` already uses) --
+`null` (unavailable, weight redistributes) when the Opportunity has no
+Eligible Majors configured at all (rule B, unrestricted -- nothing to
+compare against); `100.0` when the Opportunity has Eligible Majors
+configured (rule A) and the Student's major matches one; `0.0` when
+configured but the major is blank or matches none. The `0.0` branch is
+defensive/unreachable through Recommended Candidates or a new
+Application (the identical comparison already gated entry as
+eligibility) -- it is reachable only for a stale Application Match
+Analysis recalculated after the Student's major changed after they
+applied, which is the honest, correct behavior for that edge case, not a
+bug.
+
+**The gate and the score are still two separately-computed things --
+this is the crux of why this isn't the "disguised double-count" the
+Cleanup ruled out.** `OpportunityEligibilityService::isStudentEligible()`
+is checked *before* `MatchingService::score()` is ever called, gates
+whether a candidate is scored/shown at all, and is never read by
+`MatchingService`. `analyzeMajor()` is a separate computation inside
+`score()` that happens to compare the same two pieces of data. For a
+candidate reached through the normal, gated path, both will agree
+("eligible" / "matched", `100.0`) -- that overlap is now an accepted,
+explicit product tradeoff (major compatibility genuinely counts toward
+total Match, even though every listed candidate already cleared it as a
+prerequisite), not an oversight the way a `field_of_study`-based factor
+independent of the real gate was.
+
+**Weight change, stated exactly**: v1.2 was Skills 60 / Experience 20 (an
+80-weight denominator when both scoreable); v1.3 is Skills 60 / Major 20
+/ Experience 20 (a 100-weight denominator when all three are scoreable,
+80 when Major alone is unavailable on an unrestricted Opportunity). A
+candidate who is Skills-100/Experience-100 on a restricted, matched
+Opportunity still scores `100` (ratios unaffected). A candidate with
+Skills-0/Experience-0 on a restricted, matched Opportunity -- the exact
+"Allam" case that originally motivated the Matching Formula Audit -- now
+scores `(0*60 + 100*20 + 0*20) / 100 = 20.0`, not `0.0`: the real,
+calculated weighted average now genuinely reflects that Major
+contributed real, positive compatibility, verified in
+`MatchingFormulaAuditTest` rather than left as an unverified claim.
+
+**`OpportunityRecommendationController`**: `match_breakdown` gains
+`academic_match` (`matched`/`not_matched`/`not_applicable`, a truthful
+label over `major_match_score` -- `academicMatchFactorStatus()`, mirroring
+`experienceFactorStatus()`'s pattern) and repeats the raw
+`major_match_score` inside the breakdown for self-containment, alongside
+the unchanged `major_eligibility`. Both endpoints (`GET
+.../recommended-candidates` and `POST/GET .../analyze`/`.../analysis`)
+gain a top-level `major_match_score` the same way `skills_match_score`/
+`experience_match_score` already existed -- one shared `MatchingService`
+factor, two consuming endpoints, never two formulas.
+
+**Flutter**: `MatchBreakdownModel` gains `academicMatch`/`majorMatchScore`
+alongside the unchanged `majorEligibility`. The Recommended Candidates
+"Why X%?" expansion's first line changed from a flat "Major is eligible"
+fact to "Major matches an eligible major" -- sourced from the real,
+scored `academicMatch`, so the line now genuinely reconciles with the
+number next to it, rather than sitting beside a score it played no part
+in. `MatchAnalysisModel`/`RecommendedCandidateModel` gain
+`majorMatchScore`; the Application Details screen's factor grid gains a
+"Major Match" row (`matchFactorLabels['major']`, deliberately not
+`'field'`, to avoid ever implying a `field_of_study` dependency) between
+Skills Match and Experience Match.
+
+**Scope confirmation**: Required Skills logic is completely unchanged;
+Remote/On-site/Hybrid location eligibility (section 5c/9) is unaffected
+and still contributes nothing to the score; `field_of_study` remains
+completely unused by any factor -- this phase never reads it, and no
+`opportunities` table migration was run; `OpportunityEligibilityService`
+itself is byte-for-byte unchanged (still the sole eligibility authority,
+still checked independently of and before `MatchingService`).
+
+---
+
+## Candidate Opportunity Preferences + Final Recommendation Match Formula (v2.0)
+
+**Problem this closes**: OpportunityHub had no way for a Student to say
+*which kind* of Opportunity (Job vs. Internship vs. Volunteer vs.
+Scholarship vs. Competition) they actually want to be recommended for --
+a Student only interested in internships could be recommended for a
+full-time Job with no way to express that mismatch. Separately, the
+formula's product-approved final weights needed to be fixed exactly
+(never invented ad hoc), Experience needed to be removed entirely, and
+Location needed to become a genuine scoring factor for On-site/Hybrid --
+not just an eligibility gate.
+
+**1. `StudentProfile.interested_in`** -- a nullable JSON array column
+(`2026_08_30_090000_add_interested_in_to_student_profiles_table`),
+validated against a new single shared vocabulary,
+`App\Support\OpportunityType::ALL` (`job`/`internship`/`volunteer`/
+`scholarship`/`competition` -- the exact same values
+`Opportunity.opportunity_type` already validated against inline; both
+`StoreOpportunityRequest`/`UpdateOpportunityRequest` and
+`StoreStudentProfileRequest`/`UpdateStudentProfileRequest` now reference
+this one class via `Rule::in()`, so the vocabulary can never drift
+between the two models). Required (`min:1`) on Student Profile Setup;
+`sometimes`+`min:1` on Edit Profile (existing selection untouched if
+omitted, never clearable to empty once present) -- the identical
+`eligible_majors` convention. Never backfilled onto an existing profile;
+`null` remains a fully valid, readable state (`getProfile()` and every
+existing profile-loading path are otherwise untouched).
+
+**2. `OpportunityEligibilityService::isTypeInterestEligible()`** -- a new
+method, styled identically to the pre-existing `isLocationEligible()`:
+Recommendation-only (never gates Apply or Invitation creation, per this
+phase's own instruction to preserve those flows), and a Student with no
+`interested_in` recorded (`null` or `[]`) is treated as unrestricted,
+mirroring every other "nothing configured" rule already in this service
+(`isStudentEligible()` rule B, `isLocationEligible()`'s unconfigured-
+location case). `OpportunityRecommendationController::index()`'s
+candidate filter now checks all three axes together: type interest, then
+the pre-existing major and location gates.
+
+**3. `MatchingService` v1.3 -> v2.0**: the weight table is no longer a
+single flat set of constants -- `WORK_MODE_WEIGHTS` maps `work_mode` to
+its own nominal weights (`remote => [skills: 70, major: 30]`,
+`onsite`/`hybrid => [skills: 60, major: 25, location: 15]`), matching the
+spec's literal product-approved numbers exactly (not invented). A new
+`analyzeLocation()` -- styled identically to `analyzeMajor()` -- compares
+the Opportunity's `location_id` against the Student's own
+`availableLocations`; for Remote, it is never even called, so Location
+can never enter the weighted average, be redistributed into, or appear
+as a phantom `0`. `analyzeExperience()`/`EXPERIENCE_LEVEL_YEARS`/
+`EXPERIENCE_WEIGHT` are deleted outright (the same "delete, don't
+deprecate" precedent every prior factor removal in this project has
+followed) -- `opportunities.experience_level` remains an untouched,
+readable column, simply never read by this class again.
+
+**4. Points, not raw percentages, are the client contract.** A new
+private `weightedContributions()` replaces the old `weightedAverage()`:
+it returns, per component, its already-weighted point contribution
+(`score * weight / totalWeight`, rounded to 2dp) alongside the total
+weight actually used (post-redistribution, so it only differs from the
+nominal weight when a sibling factor was unscoreable). `overall_match_score`
+is defined as the literal sum of these already-rounded contributions --
+not an independently-rounded weighted average -- which is what guarantees,
+by construction rather than convention, that a client's "Why this
+match?" breakdown can never display numbers that fail to add up to the
+displayed total (verified directly in
+`MatchingFormulaAuditTest::test_..._reconciles_with_the_reported_total_match_score`,
+for both an On-site case with all three factors and a Remote case with
+two).
+
+**5. `OpportunityRecommendationController`/`ApplicationAnalysisController`**:
+`match_breakdown` (and the top-level candidate/analysis row) gains
+`major_weight`/`major_contribution`, `skills_weight`/`skills_contribution`,
+and `location_match_score`/`location_weight`/`location_contribution`
+(replacing the deleted `experience_match`/`experience_match_score`
+entirely). `location_eligibility`'s existing three-state label
+(`not_considered`/`unrestricted`/`matched`) is unchanged and now sits
+alongside the new location score/weight/contribution triple. The
+Recommended Candidates response's `data.opportunity` object gains
+`opportunity_type`, so the Flutter header can render real, dynamic
+"these candidates are interested in {type} opportunities" copy without
+depending on the caller to have separately passed it through navigation.
+
+**6. `Organization\CandidateController::index()`** (Talent Directory) now
+also returns each candidate's own `interested_in` -- purely informational
+(this endpoint is profile-browsing only and never itself filters by it),
+consistent with every other already-safe field this endpoint exposes.
+
+**7. Flutter**: `InterestedInField` (new, shared) is a plain `Wrap` of
+`FilterChip`s over the fixed 5-value vocabulary (`opportunityTypeLabels`,
+already the single source of truth for Opportunity Type labels) -- used
+identically by Student Profile Setup, Edit Profile, and (read-only,
+via `StatusChip`) the Student Profile display, Talent Directory candidate
+cards, and the Organization Candidate Profile screen. `MatchBreakdownModel`/
+`RecommendedCandidateModel`/`MatchAnalysisModel` all gain the new
+weight/contribution/location fields and lose every experience field.
+The Recommended Candidates "Why X%?" expansion is restructured into three
+titled factor sections (Major/Skills/Location), each showing its real
+"points / weight" label (e.g. "25 / 25") pulled directly from the
+backend response -- Flutter performs zero Match arithmetic anywhere,
+matching this phase's explicit "Flutter must never calculate Match
+itself" instruction. The screen's header gained a real Opportunity Type
+badge and dynamic type-context copy (`_MatchingExplanation`), replacing
+the previous fixed-text "Candidates shown here meet this opportunity's
+eligibility criteria..." sentence.
+
+**8. Opportunity Type visual contrast (same root cause the Eligible
+Major chip was already fixed for)**: the Organization Opportunity
+Details Identity card's Opportunity Type chip, and the Student-facing
+Opportunity Details Required Skill chip, both switched from
+`AppStatusType.primary` (near-unreadable in Dark mode -- see the
+Opportunity Academic Matching Cleanup section above for the root-cause
+analysis) to `AppStatusType.info`. The Student-facing hero's own
+Opportunity Type chip (rendered over a colored gradient background, a
+materially different visual context never verified to share the same
+defect) was deliberately left untouched, and is flagged as a remaining
+gap rather than changed on assumption.
+
+**Scope confirmation**: `OpportunityEligibilityService::isStudentEligible()`/
+`isLocationEligible()` are otherwise byte-for-byte unchanged; Required
+Skills mechanics (`analyzeSkills()`) are completely unchanged; no
+`opportunities`/`applications` table migration was run; Invitation and
+direct Apply business rules are completely unchanged (Type interest is
+Recommendation-only, exactly like Location); the canonical Location
+Catalog architecture (search/create picker, alias resolution) is
+unchanged and unreplaced.
+
+---
+
+## Organization Public Profile + Company Updates/Achievements
+
+**Problem this closes**: an Organization had a self-view/edit profile
+endpoint (`GET/PUT /organization/profile`) but no way for a Student to
+open it, and no way for an Organization to post a professional company
+update. OpportunityHub therefore looked like a bare collection of job
+forms rather than a real recruitment platform with a company presence.
+
+**1. `organization_profiles.location_id`** (new forward migration,
+`2026_09_01_090000_add_location_id_to_organization_profiles_table`) --
+a nullable FK into the existing canonical Location Catalog
+(`constrained('locations')->nullOnDelete()`), mirroring
+`opportunities.location_id`/`student_profiles.current_location_id`
+exactly. `OrganizationProfile::$appends = ['location']` exposes it
+everywhere this model is serialized as `{id, canonical_name}` (never a
+raw ID), via a `getLocationAttribute()` accessor -- the same
+hand-built-array pattern `OpportunityRecommendationController` already
+uses for its own `location` field. `Admin\OrganizationController::index()`
+eager-loads `locationRecord` alongside `user` to avoid an N+1 across the
+full organization list.
+
+**2. `organization_posts`** (new table,
+`2026_09_01_090100_create_organization_posts_table`) -- `id`,
+`organization_id` (FK `organization_profiles`, `cascadeOnDelete()` --
+the owning-parent cascade, matching `opportunities.organization_id`),
+`title` (nullable string), `body` (required text), timestamps, indexed
+on `(organization_id, created_at)` for the newest-first list query.
+Deliberately no `image_path` column: audited first, and no *working*
+public image-upload pipeline exists anywhere in this app (the `public`
+disk is declared in `config/filesystems.php` but was never wired to a
+controller and `storage:link` was never run; the only proven upload
+pattern, CV/education-verification documents, is *private*
+authenticated-download storage, not a public one). Text-only posts ship
+this phase; image support is a genuine, reported gap for a later phase.
+No likes/comments/followers/shares columns exist anywhere in this
+schema -- this is a professional update feed, not a social feed.
+
+**3. `App\Models\OrganizationPost`** -- `belongsTo` `OrganizationProfile`.
+`OrganizationProfile::posts()` is a plain `hasMany` (ordering applied by
+the controller's own `->latest()`, not baked into the relation, matching
+every other ordered `HasMany` in this app).
+
+**4. `Public\OrganizationController`** (new, unauthenticated --
+registered alongside `Public\OpportunityController` with no
+`auth:sanctum` middleware) -- `show()` and `posts()`, both 404 for an
+Organization that isn't `approval_status === 'approved'` (the same gate
+`Public\OpportunityController` already applies before showing any of
+that Organization's Opportunities, so a pending/rejected Organization
+can never be browsed publicly either way). `show()` returns an explicit,
+hand-built safe-field array (`id`, `organization_name`,
+`organization_type`, `industry`, `description`, `website`, `phone`,
+`location`) -- never the raw model, never `user_id`/`approval_status`,
+mirroring `Organization\CandidateController`'s own "never serialize the
+raw model" doctrine for the analogous Student-facing safety concern.
+
+**5. `Organization\OrganizationPostController`** (new, `role:organization`)
+-- `store()`/`update()`/`destroy()` only; there is no owner-facing
+*read* endpoint here at all, since `Public\OrganizationController::posts()`
+already serves the owner's own posts identically to how a Student sees
+them (audited and reused rather than duplicated, per this phase's own
+instruction). Ownership is enforced as 404 (never 403) on
+`update()`/`destroy()` for a post that exists but isn't the
+authenticated Organization's own -- the same "don't confirm another
+organization's resource exists" convention every other owned-resource
+endpoint in this API already uses. `store()` requires
+`org.approved` (mirroring `POST /organization/opportunities`'s own
+gate); `update()`/`destroy()` deliberately do not (mirroring that same
+route's own asymmetry, so an Organization that was later un-approved can
+still manage its own already-published content).
+
+**6. `GET /opportunities?organization_id=X`** -- one new optional filter
+on the pre-existing public Opportunity list endpoint
+(`IndexPublicOpportunityRequest`/`Public\OpportunityController::index()`),
+reusing its existing open+approved-only query rather than a second,
+duplicate "this organization's open opportunities" endpoint. This is
+what both the owner's and the public Company Profile screen's "Open
+Opportunities" section call.
+
+**7. Flutter**: `CompanyProfileScreen` (new,
+`lib/features/organization_profile/`) is one shared screen for both the
+Organization owner viewing/managing their own profile
+(`/organization/profile`, wrapped by `OrganizationOwnProfileScreen`,
+which resolves the signed-in organization's own ID from the existing
+`OrganizationProfileProvider`) and a Student (or any authenticated role)
+viewing any organization publicly (`/organizations/:id`, reachable with
+no extra role guard, same as `/notifications`). `isOwner` is computed
+client-side purely for which controls to *show*
+(Edit Profile/Create/Edit/Delete Update) -- the backend independently
+re-enforces the same ownership on every mutation regardless. A new
+`OrganizationPublicProfileProvider` (role-agnostic, plain
+`ChangeNotifierProvider`, deliberately separate from the router-critical
+`OrganizationProfileProvider`) holds whichever organization's profile/
+posts/open-opportunities are currently being *viewed* by ID, reset on
+screen dispose so a later visit to a different organization never shows
+stale data. `student_opportunity_details_screen.dart`'s existing
+`_OrganizationCard` (previously explicitly non-tappable, "no such route
+exists yet") and the Opportunity Details hero's own organization
+identity row are both now tap targets to the new public route.
+`OrganizationProfileEditScreen` (new) is the first real write path this
+app has ever had for `PUT /organization/profile` (the endpoint already
+existed; nothing in Flutter had ever called it before this phase) --
+`logo` is deliberately not offered in the form, for the same no-working-
+upload-pipeline reason `organization_posts.image_path` doesn't exist.
+
+**Scope confirmation**: no existing Organization/Opportunity/Application/
+Invitation/Assessment/Offer endpoint, model, or business rule was
+changed; `organization_profiles`' seven pre-existing fields
+(`organization_name`, `organization_type`, `industry`, `description`,
+`website`, `logo`, `phone`) and their validation are untouched; Admin
+organization approval/rejection is untouched.
+
+---
+
+## Company Profile Polish (Opportunity Organization + Safe Closed
+Management + Company Logo + Post Images)
+
+**Problem this closes**: the previous phase's Company Profile rendered
+every Open Opportunity permanently, pushing Updates & Achievements far
+below the fold for any Organization with more than a handful; Closed
+Opportunities had no owner-facing home at all; there was no safe way to
+permanently remove an old, disposable Closed Opportunity (the one
+existing delete path had a real, undiscovered gap -- see point 1); and
+neither a real Company Logo nor a post image were possible, since `logo`
+was an unused, unvalidated string column and `organization_posts` had no
+image field.
+
+**1. Opportunity deletion safety, tightened.** Audited every FK
+`opportunities.id` is referenced by: `applications` (`cascadeOnDelete`,
+already blocked by the pre-existing `destroy()` check), `invitations`
+(`cascadeOnDelete`, **was NOT blocked** -- an Opportunity with
+Invitations but zero Applications could silently cascade-delete them),
+and `quizzes.opportunity_id` (the Phase 10A.4B shared Quiz Template,
+`cascadeOnDelete`, **was NOT blocked** either -- an authored template
+with zero Applications so far could vanish silently too). Assessments/
+Interviews/Offers/quiz_attempts are all keyed via `application_id`, so
+they were already transitively safe once Applications are blocked.
+`conversations.opportunity_id` is deliberately excluded from this check
+-- it's `nullOnDelete()` by the Messaging MVP's own design (message
+history survives regardless), so a Conversation existing is not treated
+as a reason to block deletion. `Opportunity::hasRecruitmentHistory()`
+(new) is the single source of truth for all of this, also exposed as a
+derived `can_delete` boolean (`Opportunity::$appends`) so Flutter can
+show an explanatory state up front rather than only reacting to a failed
+delete attempt.
+
+**2. Two delete endpoints, deliberately kept separate.** The pre-existing
+`DELETE /organization/opportunities/{opportunity}` (still used,
+unchanged in every other way, by the Organization Opportunities
+management screen) now also enforces `hasRecruitmentHistory()` -- a pure
+safety tightening, never a status restriction; it still deletes a
+`draft`/`open`/`closed` Opportunity with zero history exactly as before.
+A NEW `DELETE /organization/opportunities/{opportunity}/closed`
+additionally requires `status === 'closed'` server-side -- this is what
+the Company Profile's own "Closed Opportunities" cleanup UI calls, and
+is the only place that formal status rule is enforced; adding it to the
+generic endpoint instead would have changed a currently-reachable,
+legitimate flow (deleting a mistaken `draft`/`open` row) that this phase
+must not touch.
+
+**3. `ImageStorageService`** (new) -- the one shared store/url/delete
+implementation both the Company Logo and post-image features use, on the
+`public` disk (`storage/app/public`, served via the `public/storage`
+symlink -- which this phase actually created via `php artisan
+storage:link`; the disk was configured but never activated before).
+Every filename is server-generated (`Str::uuid()`), matching
+`CVController::store()`'s own "the client never chooses where its file
+ends up" doctrine; this is also what rules out path traversal, since no
+client-controlled path segment exists anywhere in a stored path.
+
+**4. Company Logo.** `organization_profiles.logo` (the pre-existing,
+never-used string column) is now a managed path: `POST
+/organization/profile/logo` (real multipart upload, `image` + `mimes:`
++ `max:2048`) and `DELETE /organization/profile/logo` (revert to the
+initials fallback). `logo` is hidden from serialization and `logo_url`
+(the real, full public URL) is appended instead -- and `logo` was
+removed from the plain-JSON `PUT /organization/profile` body entirely
+(it's no longer a freely-settable string). Replacing a logo deletes the
+old managed file only *after* the new one is safely persisted, so a
+mid-request failure can never leave the profile pointing at a file that
+no longer exists.
+
+**5. Post images.** `organization_posts.image_path` (new nullable
+column, new forward migration) -- ONE optional image per post, never a
+gallery. `OrganizationPostController::store()`/`update()` accept an
+optional `image` file; `update()` additionally accepts `remove_image`
+(boolean, only consulted when `image` is absent) for the three-state
+"keep existing / replace / remove" UX the spec asks for. Deleting a post
+cleans up its managed image; a failed image validation on update leaves
+the existing post *and* its existing image completely untouched (the new
+file is validated by the FormRequest before the controller ever runs, so
+there's nothing to roll back).
+
+**6. Flutter**: the Company Profile's "Open Opportunities" section is now
+a real collapsible accordion (`AnimatedSize` + `AppMotion`) showing at
+most 4 rows initially with a "View all N" / "Show less" toggle when
+there are more; a new, owner-only "Closed Opportunities" section
+(collapsed by default) reuses the existing
+`GET /organization/opportunities` list (client-side filtered to
+`status == 'closed'`, avoiding any change to that shared endpoint), and
+renders each row's real `can_delete` state -- a genuinely deletable
+closed Opportunity gets a working "Delete Permanently" confirmation
+dialog calling the new `/closed` endpoint; one with real history gets a
+plain explanatory message instead, never a dead/hidden button pretending
+the action doesn't exist. `file_picker` (already a dependency, previously
+only used for CV upload) is reused for both the logo picker and the post
+image picker -- no new picker dependency added. Public and owner Company
+Profile rendering is otherwise identical; owner-only controls (Edit
+Profile, Closed Opportunities, Create/Edit/Delete Update, image pickers)
+are still purely a client-side `isOwner` render decision, independently
+re-enforced server-side exactly as the previous phase already
+established.
+
+**Scope confirmation**: Dashboard, Opportunities List, Create/Edit
+Opportunity, Opportunity Details, Applicants, Application Details,
+Candidate Profile, Recommended Candidates, Quiz, Interview scheduling,
+Offer, Notifications, and Admin UI are all unchanged; no Application/
+Invitation/Assessment/Quiz/Interview/Offer/notification-history row was
+ever deleted or altered by this phase's own testing; match scores are
+untouched.
 
 ---
 

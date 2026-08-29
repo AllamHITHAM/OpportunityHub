@@ -2,7 +2,11 @@
 
 namespace Tests\Feature\Notifications;
 
+use App\Models\Application;
+use App\Models\CV;
 use App\Models\Notification;
+use App\Models\OrganizationProfile;
+use App\Models\StudentProfile;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Sanctum\Sanctum;
@@ -262,6 +266,206 @@ class NotificationTest extends TestCase
         $response->assertStatus(200)
             ->assertJsonPath('success', true)
             ->assertJsonCount(0, 'data');
+    }
+
+    // -----------------------------------------------------------------
+    // Delete one (Phase 9.1)
+    // -----------------------------------------------------------------
+
+    public function test_user_can_delete_their_own_notification(): void
+    {
+        $user = $this->createUser();
+        $notification = $this->createNotification($user);
+
+        Sanctum::actingAs($user);
+
+        $response = $this->deleteJson("/api/notifications/{$notification->id}");
+
+        $response->assertStatus(200)->assertJsonPath('success', true);
+        $this->assertDatabaseMissing('notifications', ['id' => $notification->id]);
+    }
+
+    public function test_deleting_an_unread_notification_works(): void
+    {
+        $user = $this->createUser();
+        $notification = $this->createNotification($user, ['is_read' => false]);
+
+        Sanctum::actingAs($user);
+
+        $this->deleteJson("/api/notifications/{$notification->id}")->assertStatus(200);
+
+        $this->assertDatabaseMissing('notifications', ['id' => $notification->id]);
+    }
+
+    public function test_deleting_a_read_notification_works(): void
+    {
+        $user = $this->createUser();
+        $notification = $this->createNotification($user, ['is_read' => true, 'read_at' => now()]);
+
+        Sanctum::actingAs($user);
+
+        $this->deleteJson("/api/notifications/{$notification->id}")->assertStatus(200);
+
+        $this->assertDatabaseMissing('notifications', ['id' => $notification->id]);
+    }
+
+    public function test_user_cannot_delete_another_users_notification(): void
+    {
+        $owner = $this->createUser();
+        $notification = $this->createNotification($owner);
+
+        $otherUser = $this->createUser();
+        Sanctum::actingAs($otherUser);
+
+        $response = $this->deleteJson("/api/notifications/{$notification->id}");
+
+        $response->assertStatus(404)
+            ->assertJsonPath('success', false)
+            ->assertJsonPath('message', 'Notification not found');
+
+        $this->assertDatabaseHas('notifications', ['id' => $notification->id]);
+    }
+
+    public function test_an_organization_cannot_delete_a_students_notification(): void
+    {
+        $student = $this->createUser('student');
+        $notification = $this->createNotification($student);
+
+        $organization = $this->createUser('organization');
+        Sanctum::actingAs($organization);
+
+        $response = $this->deleteJson("/api/notifications/{$notification->id}");
+
+        $response->assertStatus(404);
+        $this->assertDatabaseHas('notifications', ['id' => $notification->id]);
+    }
+
+    public function test_unauthenticated_user_cannot_delete_a_notification(): void
+    {
+        $user = $this->createUser();
+        $notification = $this->createNotification($user);
+
+        $response = $this->deleteJson("/api/notifications/{$notification->id}");
+
+        $response->assertStatus(401);
+        $this->assertDatabaseHas('notifications', ['id' => $notification->id]);
+    }
+
+    public function test_deleting_a_notification_never_touches_the_related_application(): void
+    {
+        $user = $this->createUser('student');
+        $profile = StudentProfile::create(['user_id' => $user->id]);
+        $org = $this->createUser('organization');
+        $orgProfile = OrganizationProfile::create([
+            'user_id' => $org->id,
+            'organization_name' => 'Acme',
+            'organization_type' => 'company',
+        ]);
+        $opportunity = $orgProfile->opportunities()->create([
+            'title' => 'Role',
+            'description' => 'Desc',
+            'opportunity_type' => 'job',
+            'employment_type' => 'full_time',
+            'work_mode' => 'remote',
+            'experience_level' => 'junior',
+            'status' => 'open',
+        ]);
+        $cv = CV::create([
+            'student_id' => $profile->id,
+            'title' => 'My CV',
+            'file_path' => "cvs/{$profile->id}/irrelevant.pdf",
+        ]);
+        $application = Application::create([
+            'student_id' => $profile->id,
+            'opportunity_id' => $opportunity->id,
+            'cv_id' => $cv->id,
+        ]);
+        $notification = $this->createNotification($user, ['type' => 'application']);
+
+        Sanctum::actingAs($user);
+        $this->deleteJson("/api/notifications/{$notification->id}")->assertStatus(200);
+
+        $this->assertDatabaseHas('applications', ['id' => $application->id]);
+    }
+
+    public function test_invalid_or_missing_notification_id_returns_correct_not_found_response_for_delete(): void
+    {
+        $user = $this->createUser();
+
+        Sanctum::actingAs($user);
+
+        $response = $this->deleteJson('/api/notifications/999999');
+
+        $response->assertStatus(404);
+    }
+
+    // -----------------------------------------------------------------
+    // Clear read (bulk delete, Phase 9.1)
+    // -----------------------------------------------------------------
+
+    public function test_clear_read_deletes_only_read_notifications(): void
+    {
+        $user = $this->createUser();
+        $unread = $this->createNotification($user, ['is_read' => false]);
+        $read1 = $this->createNotification($user, ['is_read' => true, 'read_at' => now()]);
+        $read2 = $this->createNotification($user, ['is_read' => true, 'read_at' => now()]);
+
+        Sanctum::actingAs($user);
+
+        $response = $this->deleteJson('/api/notifications/read');
+
+        $response->assertStatus(200)
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('data.deleted_count', 2);
+
+        $this->assertDatabaseHas('notifications', ['id' => $unread->id]);
+        $this->assertDatabaseMissing('notifications', ['id' => $read1->id]);
+        $this->assertDatabaseMissing('notifications', ['id' => $read2->id]);
+    }
+
+    public function test_clear_read_only_affects_the_authenticated_users_own_notifications(): void
+    {
+        $user = $this->createUser();
+        $otherUser = $this->createUser();
+        $otherRead = $this->createNotification($otherUser, ['is_read' => true, 'read_at' => now()]);
+
+        Sanctum::actingAs($user);
+        $this->deleteJson('/api/notifications/read')->assertStatus(200);
+
+        $this->assertDatabaseHas('notifications', ['id' => $otherRead->id]);
+    }
+
+    public function test_clear_read_with_nothing_read_deletes_nothing(): void
+    {
+        $user = $this->createUser();
+        $unread = $this->createNotification($user, ['is_read' => false]);
+
+        Sanctum::actingAs($user);
+
+        $response = $this->deleteJson('/api/notifications/read');
+
+        $response->assertStatus(200)->assertJsonPath('data.deleted_count', 0);
+        $this->assertDatabaseHas('notifications', ['id' => $unread->id]);
+    }
+
+    public function test_clear_read_requires_authentication(): void
+    {
+        $response = $this->deleteJson('/api/notifications/read');
+
+        $response->assertStatus(401);
+    }
+
+    public function test_mark_all_as_read_behavior_is_unchanged_by_the_new_delete_routes(): void
+    {
+        $user = $this->createUser();
+        $this->createNotification($user);
+        $this->createNotification($user);
+
+        Sanctum::actingAs($user);
+
+        $response = $this->putJson('/api/notifications/read-all');
+
+        $response->assertStatus(200)->assertJsonPath('data.updated_count', 2);
     }
 
     private function createUser(string $role = 'student', string $status = 'active'): User

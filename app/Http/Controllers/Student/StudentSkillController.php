@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Student;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Student\StoreStudentSkillRequest;
 use App\Models\CvSkillEvidence;
+use App\Models\Skill;
 use App\Models\StudentSkill;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
@@ -20,6 +21,24 @@ class StudentSkillController extends Controller
             'success' => true,
             'message' => 'Skills retrieved successfully',
             'data' => $studentSkills,
+        ]);
+    }
+
+    /**
+     * Phase 8A-6.3: the real, selectable Skill catalog for a Manual Add
+     * Skill flow -- every `skills` row is already Admin-owned/approved by
+     * construction (there is no draft/unapproved state in this schema), so
+     * this is simply the full catalog, ordered by name for a predictable,
+     * searchable picker. Only `id`/`name`/`category` are returned -- there
+     * is nothing else on `Skill` to leak, and no Admin-only field exists on
+     * this model.
+     */
+    public function catalog(): JsonResponse
+    {
+        return response()->json([
+            'success' => true,
+            'message' => 'Skill catalog retrieved successfully',
+            'data' => Skill::orderBy('name')->get(['id', 'name', 'category']),
         ]);
     }
 

@@ -8,6 +8,7 @@ use App\Models\OrganizationProfile;
 use App\Models\Skill;
 use App\Models\StudentProfile;
 use App\Models\User;
+use App\Support\MajorNormalizer;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
@@ -105,8 +106,7 @@ class MatchingBehaviorTest extends TestCase
             ->assertJsonStructure(['data' => [
                 'overall_match_score',
                 'skills_match_score',
-                'field_match_score',
-                'experience_match_score',
+                'major_match_score',
                 'strengths',
                 'weaknesses',
                 'recommendation',
@@ -221,16 +221,21 @@ class MatchingBehaviorTest extends TestCase
     }
 
     // -----------------------------------------------------------------
-    // Phase 8A-2: v1.1 formula (Skills 60 / Field 20 / Experience 20,
-    // proportional redistribution when a factor is unavailable, no
-    // fake-neutral placeholders).
+    // v2.0, "Candidate Opportunity Preferences + Final Recommendation
+    // Match Formula": Remote = Skills 70 / Major 30; On-site/Hybrid =
+    // Skills 60 / Major 25 / Location 15. Experience is completely
+    // removed (see `MatchingService`'s own doc comment). Proportional
+    // redistribution when a factor is unavailable, no fake-neutral
+    // placeholders. `opportunityFor()` defaults to `work_mode: remote`,
+    // so tests below are Skills 70/Major 30 unless stated otherwise.
     // -----------------------------------------------------------------
 
-    // A. Perfect match on all three factors -> overall 100.
+    // A. Perfect match on both remaining factors -> overall 100.
     public function test_perfect_match_on_all_factors_scores_100(): void
     {
         $org = $this->approvedOrganization();
-        $opportunity = $this->opportunityFor($org, ['field_of_study' => 'Computer Science', 'experience_level' => 'no_experience']);
+        $opportunity = $this->opportunityFor($org);
+        $this->addEligibleMajor($opportunity, 'Computer Science');
         $skill = $this->createSkill('Laravel');
         $this->addOpportunitySkill($opportunity, $skill, true);
 
@@ -244,11 +249,12 @@ class MatchingBehaviorTest extends TestCase
         $this->assertEquals(100.0, (float) $response->json('data.overall_match_score'));
     }
 
-    // B. Zero match on all three (scoreable) factors -> overall 0.
+    // B. Zero match on both scoreable factors -> overall 0.
     public function test_zero_match_on_all_factors_scores_0(): void
     {
         $org = $this->approvedOrganization();
-        $opportunity = $this->opportunityFor($org, ['field_of_study' => 'Civil Engineering', 'experience_level' => 'senior']);
+        $opportunity = $this->opportunityFor($org);
+        $this->addEligibleMajor($opportunity, 'Computer Science');
         $skill = $this->createSkill('Laravel');
         $this->addOpportunitySkill($opportunity, $skill, true);
 
@@ -261,138 +267,122 @@ class MatchingBehaviorTest extends TestCase
         $this->assertEquals(0.0, (float) $response->json('data.overall_match_score'));
     }
 
-    // C/M. Field unavailable (no major) -- weight redistributes to skills
-    // (60) + experience (20) = 80 total, verified with exact arithmetic.
-    public function test_missing_major_redistributes_field_weight_to_skills_and_experience(): void
+    // Opportunity Academic Matching Cleanup: `field_match_score` no longer
+    // exists in the response at all -- confirmed absent regardless of
+    // what `major`/`field_of_study` are set to.
+    public function test_response_never_contains_a_field_match_score(): void
     {
         $org = $this->approvedOrganization();
-        $opportunity = $this->opportunityFor($org, ['field_of_study' => 'Computer Science', 'experience_level' => 'junior']);
-        $skill = $this->createSkill('Laravel');
-        $this->addOpportunitySkill($opportunity, $skill, true);
-
-        $student = $this->studentWithProfile(['major' => null]);
-        $this->addStudentSkill($student, $skill, years: 0.5);
-        $application = $this->applicationFor($opportunity, $student);
-
-        Sanctum::actingAs($org->user);
-        $response = $this->postJson("/api/organization/applications/{$application->id}/analyze");
-
-        // skills = 100 (matched required skill), field unavailable,
-        // experience = min(0.5/1, 1) * 100 = 50.
-        // overall = (100*60 + 50*20) / 80 = 87.5
-        $this->assertNull($response->json('data.field_match_score'));
-        $this->assertEquals(87.5, (float) $response->json('data.overall_match_score'));
-    }
-
-    // Missing opportunity.field_of_study also makes the field factor
-    // unavailable, not just a missing student major.
-    public function test_missing_field_of_study_makes_field_factor_unavailable(): void
-    {
-        $org = $this->approvedOrganization();
-        $opportunity = $this->opportunityFor($org, ['field_of_study' => null, 'experience_level' => 'no_experience']);
-
-        $student = $this->studentWithProfile(['major' => 'Computer Science']);
-        $application = $this->applicationFor($opportunity, $student);
-
-        Sanctum::actingAs($org->user);
-        $response = $this->postJson("/api/organization/applications/{$application->id}/analyze");
-
-        $this->assertNull($response->json('data.field_match_score'));
-    }
-
-    // D/E. Exact match after normalization (case + whitespace collapsing).
-    public function test_field_match_is_normalized_for_case_and_whitespace(): void
-    {
-        $org = $this->approvedOrganization();
-        $opportunity = $this->opportunityFor($org, ['field_of_study' => 'Computer   Science', 'experience_level' => 'no_experience']);
-        $student = $this->studentWithProfile(['major' => '  computer science  ']);
-        $application = $this->applicationFor($opportunity, $student);
-
-        Sanctum::actingAs($org->user);
-        $response = $this->postJson("/api/organization/applications/{$application->id}/analyze");
-
-        $this->assertEquals(100.0, (float) $response->json('data.field_match_score'));
-    }
-
-    // F. Meaningful "contains" match at a whole-word boundary.
-    public function test_field_match_accepts_a_whole_segment_contains_match(): void
-    {
-        $org = $this->approvedOrganization();
-        $opportunity = $this->opportunityFor($org, ['field_of_study' => 'Civil Engineering and Construction', 'experience_level' => 'no_experience']);
+        $opportunity = $this->opportunityFor($org, ['field_of_study' => 'ccc']);
         $student = $this->studentWithProfile(['major' => 'Civil Engineering']);
         $application = $this->applicationFor($opportunity, $student);
 
         Sanctum::actingAs($org->user);
         $response = $this->postJson("/api/organization/applications/{$application->id}/analyze");
 
-        $this->assertEquals(100.0, (float) $response->json('data.field_match_score'));
+        $response->assertJsonMissingPath('data.field_match_score');
     }
 
-    // G. Substring false-positive guard: "Art" must NOT match inside
-    // "Part-time Arts Program".
-    public function test_field_match_rejects_a_trivial_substring_false_positive(): void
+    // Opportunity Academic Matching Cleanup: legacy `field_of_study` free
+    // text (however unrelated to the student's real major) can never
+    // change `overall_match_score` -- it is no longer read by
+    // MatchingService at all.
+    public function test_field_of_study_never_changes_the_overall_score(): void
     {
         $org = $this->approvedOrganization();
-        $opportunity = $this->opportunityFor($org, ['field_of_study' => 'Part-time Arts Program', 'experience_level' => 'no_experience']);
-        $student = $this->studentWithProfile(['major' => 'Art']);
-        $application = $this->applicationFor($opportunity, $student);
+        $skill = $this->createSkill('Laravel');
+        $student = $this->studentWithProfile(['major' => 'Civil Engineering']);
+        $this->addStudentSkill($student, $skill, years: 2);
+
+        $opportunityWithUnrelatedField = $this->opportunityFor($org, ['field_of_study' => 'ccc']);
+        $this->addEligibleMajor($opportunityWithUnrelatedField, 'Civil Engineering');
+        $this->addOpportunitySkill($opportunityWithUnrelatedField, $skill, true);
+        $applicationA = $this->applicationFor($opportunityWithUnrelatedField, $student);
+
+        $opportunityWithNoField = $this->opportunityFor($org, ['field_of_study' => null]);
+        $this->addEligibleMajor($opportunityWithNoField, 'Civil Engineering');
+        $this->addOpportunitySkill($opportunityWithNoField, $skill, true);
+        $applicationB = $this->applicationFor($opportunityWithNoField, $student);
 
         Sanctum::actingAs($org->user);
-        $response = $this->postJson("/api/organization/applications/{$application->id}/analyze");
+        $responseA = $this->postJson("/api/organization/applications/{$applicationA->id}/analyze");
+        $responseB = $this->postJson("/api/organization/applications/{$applicationB->id}/analyze");
 
-        $this->assertEquals(0.0, (float) $response->json('data.field_match_score'));
+        $this->assertEquals(
+            $responseA->json('data.overall_match_score'),
+            $responseB->json('data.overall_match_score'),
+        );
     }
 
     // H. Opportunity with zero skills defined at all -> skills unavailable
-    // (not the old fake 100), weight redistributes to field + experience.
+    // (not a fake 100), weight redistributes entirely to Major (the only
+    // other, and now only remaining, factor on a Remote Opportunity).
     public function test_no_opportunity_skills_makes_skills_factor_unavailable_not_a_fake_100(): void
     {
         $org = $this->approvedOrganization();
-        $opportunity = $this->opportunityFor($org, ['field_of_study' => 'Computer Science', 'experience_level' => 'no_experience']);
+        $opportunity = $this->opportunityFor($org);
+        $this->addEligibleMajor($opportunity, 'Fine Arts');
         $student = $this->studentWithProfile(['major' => 'Fine Arts']);
         $application = $this->applicationFor($opportunity, $student);
 
         Sanctum::actingAs($org->user);
         $response = $this->postJson("/api/organization/applications/{$application->id}/analyze");
 
-        // skills unavailable (null), field = 0 (no match), experience = 100
-        // (no_experience). overall = (0*20 + 100*20) / 40 = 50.
+        // skills unavailable (null), major = 100 (matched).
+        // overall = (100*30) / 30 = 100 -- the only scoreable factor.
         $this->assertNull($response->json('data.skills_match_score'));
-        $this->assertEquals(50.0, (float) $response->json('data.overall_match_score'));
+        $this->assertEquals(100.0, (float) $response->json('data.overall_match_score'));
     }
 
-    // I. `no_experience` requires 0 years -> automatically 100 regardless
-    // of the student's own recorded experience.
-    public function test_no_experience_level_always_scores_100_on_experience(): void
+    // I. Experience has zero influence -- `experience_level` is left
+    // completely unread by `MatchingService`. Two Opportunities differing
+    // only in `experience_level` must score identically.
+    public function test_experience_level_has_zero_influence_on_the_score(): void
     {
         $org = $this->approvedOrganization();
-        $opportunity = $this->opportunityFor($org, ['experience_level' => 'no_experience']);
-        $student = $this->studentWithProfile();
-        $application = $this->applicationFor($opportunity, $student);
+        $skill = $this->createSkill('Laravel');
+        $student = $this->studentWithProfile(['major' => 'Civil Engineering']);
+        // Deliberately no years_of_experience recorded at all -- if
+        // Experience still influenced the score, a `senior`-level
+        // Opportunity would score this student worse than a
+        // `no_experience` one.
+        $this->addStudentSkill($student, $skill);
+
+        $opportunityNoExperience = $this->opportunityFor($org, ['experience_level' => 'no_experience']);
+        $this->addEligibleMajor($opportunityNoExperience, 'Civil Engineering');
+        $this->addOpportunitySkill($opportunityNoExperience, $skill, true);
+        $applicationA = $this->applicationFor($opportunityNoExperience, $student);
+
+        $opportunitySenior = $this->opportunityFor($org, ['experience_level' => 'senior']);
+        $this->addEligibleMajor($opportunitySenior, 'Civil Engineering');
+        $this->addOpportunitySkill($opportunitySenior, $skill, true);
+        $applicationB = $this->applicationFor($opportunitySenior, $student);
+
+        Sanctum::actingAs($org->user);
+        $responseA = $this->postJson("/api/organization/applications/{$applicationA->id}/analyze");
+        $responseB = $this->postJson("/api/organization/applications/{$applicationB->id}/analyze");
+
+        $this->assertEquals(
+            $responseA->json('data.overall_match_score'),
+            $responseB->json('data.overall_match_score'),
+        );
+        $this->assertEquals(100.0, (float) $responseA->json('data.overall_match_score'));
+    }
+
+    // I2. Experience never appears as a failed Match factor -- there is no
+    // `experience_match_score`/`experience_match` key in the response at
+    // all any more.
+    public function test_response_never_contains_an_experience_match_score(): void
+    {
+        $org = $this->approvedOrganization();
+        $opportunity = $this->opportunityFor($org, ['experience_level' => 'senior']);
+        $application = $this->applicationFor($opportunity, $this->studentWithProfile());
 
         Sanctum::actingAs($org->user);
         $response = $this->postJson("/api/organization/applications/{$application->id}/analyze");
 
-        $this->assertEquals(100.0, (float) $response->json('data.experience_match_score'));
-    }
-
-    // J. Experience is proportional to the max years_of_experience across
-    // the student's skills, capped at 100.
-    public function test_experience_score_is_proportional_to_max_years_of_experience(): void
-    {
-        $org = $this->approvedOrganization();
-        $opportunity = $this->opportunityFor($org, ['experience_level' => 'mid']); // requires 3 years
-        $skillA = $this->createSkill('Laravel');
-        $skillB = $this->createSkill('Docker');
-        $student = $this->studentWithProfile();
-        $this->addStudentSkill($student, $skillA, years: 1.5);
-        $this->addStudentSkill($student, $skillB, years: 6.0); // max wins, capped at 100
-        $application = $this->applicationFor($opportunity, $student);
-
-        Sanctum::actingAs($org->user);
-        $response = $this->postJson("/api/organization/applications/{$application->id}/analyze");
-
-        $this->assertEquals(100.0, (float) $response->json('data.experience_match_score'));
+        $response->assertJsonMissingPath('data.experience_match_score');
+        $response->assertJsonMissingPath('data.experience_match');
     }
 
     // K. No education placeholder anywhere in the response.
@@ -431,25 +421,27 @@ class MatchingBehaviorTest extends TestCase
         $this->assertEquals(66.67, (float) $response->json('data.skills_match_score'));
     }
 
-    // M (arithmetic proof). Explicit weighted-average check across all
-    // three scoreable factors together.
+    // M (arithmetic proof). Explicit weighted-average check across both
+    // remaining scoreable factors together, on a Remote Opportunity
+    // (Skills 70 / Major 30).
     public function test_overall_score_is_the_exact_weighted_average_of_scoreable_factors(): void
     {
         $org = $this->approvedOrganization();
-        $opportunity = $this->opportunityFor($org, ['field_of_study' => 'Computer Science', 'experience_level' => 'mid']); // 3 years
+        $opportunity = $this->opportunityFor($org);
+        $this->addEligibleMajor($opportunity, 'Computer Science'); // student's major won't match
         $skill = $this->createSkill('Laravel');
         $this->addOpportunitySkill($opportunity, $skill, true);
 
-        $student = $this->studentWithProfile(['major' => 'Fine Arts']); // field mismatch -> 0
+        $student = $this->studentWithProfile(['major' => 'Fine Arts']);
         $this->addStudentSkill($student, $skill); // skills match -> 100
-        // no years_of_experience recorded -> experience = 0
+        // major does not match the restricted list -> major = 0
         $application = $this->applicationFor($opportunity, $student);
 
         Sanctum::actingAs($org->user);
         $response = $this->postJson("/api/organization/applications/{$application->id}/analyze");
 
-        // overall = (100*60 + 0*20 + 0*20) / 100 = 60.0
-        $this->assertEquals(60.0, (float) $response->json('data.overall_match_score'));
+        // overall = (100*70 + 0*30) / 100 = 70.0
+        $this->assertEquals(70.0, (float) $response->json('data.overall_match_score'));
     }
 
     private function approvedOrganization(): object
@@ -528,6 +520,14 @@ class MatchingBehaviorTest extends TestCase
             'skill_id' => $skill->id,
             'level' => 'intermediate',
             'years_of_experience' => $years,
+        ]);
+    }
+
+    private function addEligibleMajor(Opportunity $opportunity, string $major): void
+    {
+        $opportunity->eligibleMajorRecords()->create([
+            'major_name' => $major,
+            'normalized_major_name' => MajorNormalizer::normalize($major),
         ]);
     }
 }

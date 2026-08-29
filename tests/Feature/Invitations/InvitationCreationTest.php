@@ -338,18 +338,21 @@ class InvitationCreationTest extends TestCase
         $this->assertDatabaseCount('notifications', 0);
     }
 
-    public function test_legacy_field_of_study_eligibility_applies_to_invitations_too(): void
+    public function test_field_of_study_alone_never_blocks_an_invitation(): void
     {
+        // Regression test for the real reported bug: field_of_study set,
+        // eligible_majors genuinely empty -- must NOT restrict eligibility.
+        // field_of_study is descriptive metadata, never an eligibility gate.
         $org = $this->approvedOrganization();
         $opportunity = $this->opportunityFor($org, ['field_of_study' => 'Civil Engineering']);
-        $ineligible = $this->studentWithProfile(major: 'Fine Arts');
+        $student = $this->studentWithProfile(major: 'Fine Arts');
 
         Sanctum::actingAs($org->user);
 
         $this->postJson('/api/organization/invitations', [
-            'student_id' => $ineligible->id,
+            'student_id' => $student->id,
             'opportunity_id' => $opportunity->id,
-        ])->assertStatus(422);
+        ])->assertStatus(201);
     }
 
     // -----------------------------------------------------------------

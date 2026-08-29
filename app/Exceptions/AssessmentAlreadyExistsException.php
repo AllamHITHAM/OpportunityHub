@@ -5,14 +5,18 @@ namespace App\Exceptions;
 use Exception;
 
 /**
- * Thrown by AssessmentService when an application already has an
- * Assessment -- either detected by the pre-check
- * (`$application->assessment()->exists()`) or by translating a
- * `assessments.application_id` unique-constraint violation caught during
- * the creation transaction (the final concurrency authority). Carries no
- * HTTP concerns -- each calling controller decides its own user-facing 409
- * message (the legacy and generic endpoints intentionally word this
- * differently).
+ * Thrown by AssessmentService when an application already has an *active*
+ * (non-final) Assessment -- an application with only finalized Assessment
+ * history (e.g. a completed Quiz) does NOT throw this; that's exactly the
+ * Phase 10A.3 "Advance to Interview" case. Detected inside the creation
+ * transaction, after row-locking the parent Application
+ * (`AssessmentService::lockApplication()`), which is what makes this the
+ * final concurrency authority as of Phase 10A.3 -- there is no longer a
+ * database unique constraint to fall back on (`assessments.application_id`
+ * stopped being unique once Assessment history was allowed; see that
+ * migration's own doc comment). Carries no HTTP concerns -- each calling
+ * controller decides its own user-facing 409 message (the legacy and
+ * generic endpoints intentionally word this differently).
  */
 class AssessmentAlreadyExistsException extends Exception
 {

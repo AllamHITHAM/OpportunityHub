@@ -39,8 +39,15 @@ class SubmitQuizTest extends TestCase
 
         $response->assertStatus(200)
             ->assertJsonPath('success', true)
-            ->assertJsonPath('message', 'Quiz submitted successfully')
-            ->assertJsonPath('data.score', 100);
+            ->assertJsonPath('message', 'Quiz submitted successfully');
+        // Phase 10A.4A: `score` is no longer revealed in the submit
+        // response until a ready Organization decision exists (see
+        // ResultReleaseTest) -- grading correctness is asserted directly
+        // against the persisted attempt instead.
+        $this->assertSame(
+            100,
+            QuizAttempt::where('quiz_id', $scenario['quiz']->id)->value('score'),
+        );
     }
 
     public function test_partial_score_is_computed_correctly(): void
@@ -53,7 +60,11 @@ class SubmitQuizTest extends TestCase
             ['question_id' => $scenario['tf']->id, 'answer' => 'False'],
         ]);
 
-        $response->assertStatus(200)->assertJsonPath('data.score', 50);
+        $response->assertStatus(200);
+        $this->assertSame(
+            50,
+            QuizAttempt::where('quiz_id', $scenario['quiz']->id)->value('score'),
+        );
     }
 
     public function test_all_incorrect_scores_zero(): void
@@ -66,7 +77,11 @@ class SubmitQuizTest extends TestCase
             ['question_id' => $scenario['tf']->id, 'answer' => 'False'],
         ]);
 
-        $response->assertStatus(200)->assertJsonPath('data.score', 0);
+        $response->assertStatus(200);
+        $this->assertSame(
+            0,
+            QuizAttempt::where('quiz_id', $scenario['quiz']->id)->value('score'),
+        );
     }
 
     public function test_exact_rounding_behavior_rounds_half_up(): void
@@ -103,7 +118,11 @@ class SubmitQuizTest extends TestCase
 
         $response = $this->submit($scenario, $answers);
 
-        $response->assertStatus(200)->assertJsonPath('data.score', 13);
+        $response->assertStatus(200);
+        $this->assertSame(
+            13,
+            QuizAttempt::where('quiz_id', $scenario['quiz']->id)->value('score'),
+        );
     }
 
     public function test_score_meeting_passing_threshold_passes(): void
@@ -436,7 +455,11 @@ class SubmitQuizTest extends TestCase
 
         // Both answers are wrong -- the client's own bogus points/score/
         // correct_answer fields are never read, only `question_id`/`answer`.
-        $response->assertStatus(200)->assertJsonPath('data.score', 0);
+        $response->assertStatus(200);
+        $this->assertSame(
+            0,
+            QuizAttempt::where('quiz_id', $scenario['quiz']->id)->value('score'),
+        );
     }
 
     // ---- Helpers -----------------------------------------------------

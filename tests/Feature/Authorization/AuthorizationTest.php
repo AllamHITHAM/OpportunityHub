@@ -3,6 +3,7 @@
 namespace Tests\Feature\Authorization;
 
 use App\Models\OrganizationProfile;
+use App\Models\Skill;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Sanctum\Sanctum;
@@ -34,7 +35,7 @@ class AuthorizationTest extends TestCase
     {
         Sanctum::actingAs($this->studentUser());
 
-        $response = $this->postJson('/api/student/profile', []);
+        $response = $this->postJson('/api/student/profile', ['interested_in' => ['job']]);
 
         $response->assertStatus(201)
             ->assertJsonPath('success', true);
@@ -212,6 +213,8 @@ class AuthorizationTest extends TestCase
 
     private function validOpportunityPayload(): array
     {
+        $skillId = Skill::firstOrCreate(['name' => 'PHP'])->id;
+
         return [
             'title' => 'Software Engineer',
             'description' => 'A great opportunity.',
@@ -219,6 +222,10 @@ class AuthorizationTest extends TestCase
             'employment_type' => 'full_time',
             'work_mode' => 'remote',
             'experience_level' => 'junior',
+            // Opportunity Requirements Integrity Patch: required to
+            // create through the real endpoint.
+            'eligible_majors' => ['Computer Science'],
+            'skills' => [['skill_id' => $skillId, 'is_required' => true]],
         ];
     }
 }

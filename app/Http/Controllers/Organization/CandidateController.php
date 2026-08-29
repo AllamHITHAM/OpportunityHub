@@ -62,7 +62,7 @@ class CandidateController extends Controller
             ->whereHas('user', function ($q) {
                 $q->where('status', 'active');
             })
-            ->with(['studentSkills.skill', 'educationVerification', 'user:id,name']);
+            ->with(['studentSkills.skill', 'educationVerification', 'currentLocation', 'availableLocations', 'user:id,name,email']);
 
         if ($request->filled('name')) {
             $name = $request->query('name');
@@ -98,12 +98,12 @@ class CandidateController extends Controller
             )->values();
         }
 
-        $appliedStudentIds = [];
+        $applicationsByStudentId = collect();
         $invitedStudentIds = [];
         if ($opportunity !== null) {
-            $appliedStudentIds = Application::where('opportunity_id', $opportunity->id)
-                ->pluck('student_id')
-                ->all();
+            $applicationsByStudentId = Application::where('opportunity_id', $opportunity->id)
+                ->get(['id', 'student_id'])
+                ->keyBy('student_id');
             $invitedStudentIds = Invitation::where('opportunity_id', $opportunity->id)
                 ->pluck('student_id')
                 ->all();
@@ -111,25 +111,57 @@ class CandidateController extends Controller
 
         $data = $candidates->map(function (StudentProfile $profile) use (
             $opportunity,
-            $appliedStudentIds,
+            $applicationsByStudentId,
             $invitedStudentIds,
         ) {
+            $application = $applicationsByStudentId->get($profile->id);
+
             $candidate = [
                 'id' => $profile->id,
                 'name' => $profile->user->name,
                 'university' => $profile->university,
                 'major' => $profile->major,
                 'graduation_year' => $profile->graduation_year,
+                'bio' => $profile->bio,
                 'education_verification_status' => $profile->education_verification_status,
+                'current_location' => $profile->currentLocation
+                    ? ['id' => $profile->currentLocation->id, 'canonical_name' => $profile->currentLocation->canonical_name]
+                    : null,
+                'available_locations' => $profile->availableLocations->map(fn ($location) => [
+                    'id' => $location->id,
+                    'canonical_name' => $location->canonical_name,
+                ])->values(),
                 'skills' => $profile->studentSkills->map(fn ($studentSkill) => [
                     'name' => $studentSkill->skill->name,
                     'source' => $studentSkill->source,
                 ])->values(),
+                // Candidate Opportunity Preferences patch: the Student's
+                // own canonical Opportunity Type interest(s) -- purely
+                // informational here (Talent Directory is profile
+                // browsing only, never itself an eligibility filter);
+                // `null` for a profile from before this patch, never
+                // backfilled or guessed.
+                'interested_in' => $profile->interested_in,
             ];
 
             if ($opportunity !== null) {
-                $candidate['already_applied'] = in_array($profile->id, $appliedStudentIds, true);
+                $candidate['already_applied'] = $application !== null;
+                $candidate['application_id'] = $application?->id;
                 $candidate['already_invited'] = in_array($profile->id, $invitedStudentIds, true);
+
+                // Organization Candidate Profile Enrichment: contact info
+                // stays hidden for general (unscoped) Talent Directory
+                // browsing -- see this controller's own doc comment on the
+                // long-standing "never phone/email" guarantee for that
+                // case. It is only ever included here once a real
+                // Application already exists for *this* Opportunity, the
+                // same relationship signal that already gates CV access
+                // (`Organization\ApplicationController::downloadCv()`) --
+                // never a new, broader authorization surface.
+                if ($application !== null) {
+                    $candidate['phone'] = $profile->phone;
+                    $candidate['email'] = $profile->user->email;
+                }
             }
 
             return $candidate;
