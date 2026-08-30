@@ -21,7 +21,10 @@ class StoreStudentProfileRequest extends FormRequest
             'major' => ['nullable', 'string', 'max:255'],
             'graduation_year' => ['nullable', 'integer', 'between:1950,2100'],
             'bio' => ['nullable', 'string', 'max:2000'],
-            'profile_image' => ['nullable', 'string', 'max:255'],
+            // Student Profile Photo: settable only through the dedicated
+            // upload/remove endpoints (mirrors
+            // `UpdateOrganizationProfileRequest` no longer accepting
+            // `logo`) -- never an arbitrary client-supplied string here.
             // Candidate Opportunity Preferences patch: the canonical
             // Opportunity Type(s) this Student wants to be recommended
             // for -- the exact same vocabulary `Opportunity.opportunity_type`

@@ -129,6 +129,11 @@ Route::middleware(['auth:sanctum', 'active', 'role:student'])->group(function ()
     Route::get('/student/profile', [StudentProfileController::class, 'show']);
     Route::post('/student/profile', [StudentProfileController::class, 'store']);
     Route::put('/student/profile', [StudentProfileController::class, 'update']);
+
+    // Student Profile Photo: mirrors the Company Logo upload/remove
+    // routes exactly (Organization\OrganizationProfileController above).
+    Route::post('/student/profile/photo', [StudentProfileController::class, 'uploadPhoto']);
+    Route::delete('/student/profile/photo', [StudentProfileController::class, 'removePhoto']);
 });
 
 Route::middleware(['auth:sanctum', 'active', 'role:student', 'profile.exists'])->group(function () {

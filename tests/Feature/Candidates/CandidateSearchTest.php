@@ -168,9 +168,11 @@ class CandidateSearchTest extends TestCase
         // intentionally exposed (professional profile fields, spec item
         // 4/6) -- `phone`/`email`/`profile_image` remain absent here since
         // there is no `opportunity_id` (no Application relationship) in
-        // this general/unscoped Talent Directory search.
+        // this general/unscoped Talent Directory search. `profile_photo_url`
+        // (Student Profile Photo phase) is the safe, derived URL -- never
+        // the raw `profile_image` storage path.
         $this->assertSame(
-            ['id', 'name', 'university', 'major', 'graduation_year', 'bio', 'education_verification_status', 'current_location', 'available_locations', 'skills', 'interested_in'],
+            ['id', 'name', 'university', 'major', 'graduation_year', 'bio', 'profile_photo_url', 'education_verification_status', 'current_location', 'available_locations', 'skills', 'interested_in'],
             array_keys($candidate),
         );
         $this->assertSame('manual', $candidate['skills'][0]['source']);

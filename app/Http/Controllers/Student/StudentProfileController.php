@@ -5,11 +5,17 @@ namespace App\Http\Controllers\Student;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Student\StoreStudentProfileRequest;
 use App\Http\Requests\Student\UpdateStudentProfileRequest;
+use App\Http\Requests\Student\UploadStudentProfilePhotoRequest;
+use App\Services\ImageStorageService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 class StudentProfileController extends Controller
 {
+    public function __construct(private readonly ImageStorageService $images)
+    {
+    }
+
     public function show(Request $request): JsonResponse
     {
         $profile = $request->user()->studentProfile;
@@ -109,6 +115,82 @@ class StudentProfileController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Student profile updated successfully',
+            'data' => $profile,
+        ]);
+    }
+
+    /**
+     * Uploads (or replaces) the Student's Profile Photo -- mirrors
+     * `Organization\OrganizationProfileController::uploadLogo()` exactly:
+     * a real, server-validated multipart image upload (see
+     * `UploadStudentProfilePhotoRequest`), a fresh random filename,
+     * stored on the public disk via `ImageStorageService`. The
+     * previously-stored photo file, if any, is deleted only *after* the
+     * new one is safely persisted to the profile -- so a mid-request
+     * failure can never leave the profile pointing at a file that no
+     * longer exists.
+     */
+    public function uploadPhoto(UploadStudentProfilePhotoRequest $request): JsonResponse
+    {
+        $profile = $request->user()->studentProfile;
+
+        if (! $profile) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Student profile not found',
+                'data' => null,
+            ], 404);
+        }
+
+        $oldPhotoPath = $profile->profile_image;
+
+        $storedPath = $this->images->store($request->file('photo'), "student-profile-photos/{$profile->id}");
+        $profile->update(['profile_image' => $storedPath]);
+
+        $this->images->delete($oldPhotoPath);
+
+        $profile->load([
+            'availableLocations:id,canonical_name',
+            'currentLocation:id,canonical_name',
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Profile photo updated successfully',
+            'data' => $profile,
+        ]);
+    }
+
+    /**
+     * Removes the Student's Profile Photo, reverting to the existing
+     * initials fallback -- deletes the managed file and clears the
+     * column. A no-op (still 200, still returns the profile) when no
+     * photo was set. Mirrors
+     * `Organization\OrganizationProfileController::removeLogo()` exactly.
+     */
+    public function removePhoto(Request $request): JsonResponse
+    {
+        $profile = $request->user()->studentProfile;
+
+        if (! $profile) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Student profile not found',
+                'data' => null,
+            ], 404);
+        }
+
+        $this->images->delete($profile->profile_image);
+        $profile->update(['profile_image' => null]);
+
+        $profile->load([
+            'availableLocations:id,canonical_name',
+            'currentLocation:id,canonical_name',
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Profile photo removed successfully',
             'data' => $profile,
         ]);
     }

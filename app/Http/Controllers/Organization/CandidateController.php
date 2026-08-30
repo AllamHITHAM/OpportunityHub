@@ -123,6 +123,7 @@ class CandidateController extends Controller
                 'major' => $profile->major,
                 'graduation_year' => $profile->graduation_year,
                 'bio' => $profile->bio,
+                'profile_photo_url' => $profile->profile_photo_url,
                 'education_verification_status' => $profile->education_verification_status,
                 'current_location' => $profile->currentLocation
                     ? ['id' => $profile->currentLocation->id, 'canonical_name' => $profile->currentLocation->canonical_name]

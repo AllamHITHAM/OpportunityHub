@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\ImageStorageService;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
@@ -46,9 +47,14 @@ class StudentProfile extends Model
      * in the final serialized output -- so this must list the camelCase
      * form, unlike a normal hidden column.
      */
-    protected $hidden = ['educationVerification'];
+    /**
+     * Student Profile Photo: `profile_image` is the managed storage path
+     * (never exposed raw, mirroring `OrganizationProfile::logo`) --
+     * [profile_photo_url] below is the only way this is ever surfaced.
+     */
+    protected $hidden = ['educationVerification', 'profile_image'];
 
-    protected $appends = ['education_verification_status'];
+    protected $appends = ['education_verification_status', 'profile_photo_url'];
 
     public function user(): BelongsTo
     {
@@ -135,5 +141,16 @@ class StudentProfile extends Model
     public function getEducationVerificationStatusAttribute(): string
     {
         return $this->educationVerification?->status ?? 'not_submitted';
+    }
+
+    /**
+     * Student Profile Photo: mirrors
+     * `OrganizationProfile::getLogoUrlAttribute()` exactly -- a full,
+     * publicly-reachable `/api/media/{path}` URL (never a raw storage
+     * path), `null` until the Student uploads one.
+     */
+    public function getProfilePhotoUrlAttribute(): ?string
+    {
+        return app(ImageStorageService::class)->url($this->profile_image);
     }
 }
