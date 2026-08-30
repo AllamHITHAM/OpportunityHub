@@ -18,9 +18,10 @@ use Illuminate\Database\Seeder;
  *
  *     php artisan db:seed --class=Database\\Seeders\\BaselineSkillSeeder
  *
- * Also wired into DatabaseSeeder::run() alongside AdminUserSeeder, since
- * (unlike that seeder) this one is safe to include there -- re-running the
- * whole DatabaseSeeder never duplicates or destroys a Skill row.
+ * Also wired into DatabaseSeeder::run() -- it's fully idempotent, so
+ * re-running the whole DatabaseSeeder never duplicates or destroys a
+ * Skill row. See DatabaseSeeder's own doc comment for why demo/test data
+ * and Admin bootstrap are deliberately kept out of that default run.
  */
 class BaselineSkillSeeder extends Seeder
 {

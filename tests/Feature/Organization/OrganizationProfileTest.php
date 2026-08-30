@@ -224,9 +224,11 @@ class OrganizationProfileTest extends TestCase
 
         // The URL the API actually returned really does resolve to the
         // real uploaded bytes -- not just a plausible-looking string.
+        // CORS policy itself is covered by CorsConfigurationTest/
+        // MediaControllerTest -- this test's own concern is that the
+        // logo genuinely uploads and is fetchable.
         $mediaResponse = $this->get(parse_url($logoUrl, PHP_URL_PATH));
         $mediaResponse->assertStatus(200);
-        $mediaResponse->assertHeader('Access-Control-Allow-Origin', '*');
         $this->assertEquals(
             base64_decode(self::TINY_PNG_BASE64),
             $mediaResponse->streamedContent(),

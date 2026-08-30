@@ -29,8 +29,36 @@ class MediaControllerTest extends TestCase
         'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY'.
         '42YAAAAASUVORK5CYII=';
 
-    public function test_a_stored_image_is_served_with_an_explicit_cors_header(): void
+    public function test_a_stored_image_is_served_and_carries_the_app_cors_policy(): void
     {
+        Storage::fake('public');
+        $bytes = base64_decode(self::TINY_PNG_BASE64);
+        $path = app(ImageStorageService::class)->store(
+            UploadedFile::fake()->createWithContent('logo.png', $bytes),
+            'organization-logos/1',
+        );
+
+        // Backend Configuration & Safety Pass: this route no longer sets
+        // its own CORS header -- it's covered by the same
+        // environment-driven config/cors.php policy as every other
+        // /api/* route (see CorsConfigurationTest for that policy's own
+        // coverage), so a cross-origin request needs a real Origin
+        // header to receive Access-Control-Allow-Origin at all.
+        $response = $this->get('/api/media/'.$path, [
+            'Origin' => 'http://localhost:8080',
+        ]);
+
+        $response->assertStatus(200);
+        $response->assertHeader('Access-Control-Allow-Origin', 'http://localhost:8080');
+        $response->assertHeader('Content-Type', 'image/png');
+        $this->assertEquals($bytes, $response->streamedContent());
+    }
+
+    public function test_a_stored_image_still_serves_correctly_for_a_same_origin_request_with_no_origin_header(): void
+    {
+        // Native platforms (Android/iOS/desktop Dio requests) never send
+        // an Origin header at all -- CORS is a browser-only mechanism.
+        // The image itself must still load regardless.
         Storage::fake('public');
         $bytes = base64_decode(self::TINY_PNG_BASE64);
         $path = app(ImageStorageService::class)->store(
@@ -41,8 +69,7 @@ class MediaControllerTest extends TestCase
         $response = $this->get('/api/media/'.$path);
 
         $response->assertStatus(200);
-        $response->assertHeader('Access-Control-Allow-Origin', '*');
-        $response->assertHeader('Content-Type', 'image/png');
+        $response->assertHeaderMissing('Access-Control-Allow-Origin');
         $this->assertEquals($bytes, $response->streamedContent());
     }
 
@@ -93,9 +120,9 @@ class MediaControllerTest extends TestCase
         $this->assertStringNotContainsString('storage/app', $url);
         $this->assertStringNotContainsString('\\', $url);
 
-        $this->get(parse_url($url, PHP_URL_PATH))
+        $this->get(parse_url($url, PHP_URL_PATH), ['Origin' => 'http://localhost:8080'])
             ->assertStatus(200)
-            ->assertHeader('Access-Control-Allow-Origin', '*');
+            ->assertHeader('Access-Control-Allow-Origin', 'http://localhost:8080');
     }
 
     public function test_the_company_logo_and_post_image_urls_both_resolve_through_the_real_endpoint(): void

@@ -51,6 +51,14 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
  * that symlink even exists. `storage:link` is therefore no longer required
  * for this app's own served images to render correctly (documented here
  * since the bug report explicitly asked for that to be called out).
+ *
+ * **Backend Configuration & Safety Pass**: this controller no longer sets
+ * its own `Access-Control-Allow-Origin` header -- now that a real,
+ * environment-driven `config/cors.php` exists, `HandleCors` already
+ * applies that same policy to this route (it matches the configured
+ * `api/*` path exactly like every other `/api/*` endpoint), so a second,
+ * separately-hardcoded header here would just be a redundant, competing
+ * source of truth. One authoritative CORS policy for the whole app.
  */
 class MediaController extends Controller
 {
@@ -59,13 +67,12 @@ class MediaController extends Controller
      * explicit long-lived cache header (safe: every stored filename is a
      * server-generated UUID that's never reused for different bytes -- see
      * `ImageStorageService::store()` -- so a given URL's content never
-     * changes once published) and an explicit CORS header matching this
-     * app's existing `/api/*` policy, so it renders identically whether
-     * requested by the API's own origin or Flutter Web's dev-server
-     * origin. A path with no matching stored file, or containing a `..`
-     * traversal segment, is a plain 404 -- this never reveals whether a
-     * *different*, real path exists, and never exposes any server
-     * filesystem path in the response.
+     * changes once published). CORS itself is handled by the app's own
+     * `HandleCors` middleware + `config/cors.php`, not set here. A path
+     * with no matching stored file, or containing a `..` traversal
+     * segment, is a plain 404 -- this never reveals whether a *different*,
+     * real path exists, and never exposes any server filesystem path in
+     * the response.
      */
     public function show(string $path): StreamedResponse
     {
@@ -74,7 +81,6 @@ class MediaController extends Controller
         }
 
         return Storage::disk('public')->response($path, null, [
-            'Access-Control-Allow-Origin' => '*',
             'Cache-Control' => 'public, max-age=31536000, immutable',
         ]);
     }

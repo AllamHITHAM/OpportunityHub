@@ -25,6 +25,40 @@ return Application::configure(basePath: dirname(__DIR__))
             'profile.exists' => EnsureStudentProfileExists::class,
             'org.approved' => EnsureOrganizationIsApproved::class,
         ]);
+
+        // Backend Configuration & Safety Pass: correct https:// URL
+        // generation (route()/url(), password-reset and email-
+        // verification signed links, ImageStorageService::url()) when
+        // staging sits behind a TLS-terminating reverse proxy/PaaS load
+        // balancer -- without it, Laravel sees the plain-HTTP connection
+        // from the proxy to PHP and generates http:// URLs even though
+        // the real client connection was HTTPS.
+        //
+        // Empty (nothing trusted) by default -- exactly today's local-dev
+        // behavior, where there is no proxy and the scheme is whatever
+        // the actual connection really is. TRUSTED_PROXIES is set only
+        // once the real staging infrastructure is known (a later phase):
+        // either a specific proxy IP/CIDR list, or the literal string
+        // "*" to trust the immediate connecting proxy unconditionally
+        // (Laravel's own supported shorthand for "trust whoever is
+        // directly connecting" -- appropriate only when the app is
+        // guaranteed unreachable except through that proxy, the normal
+        // case for a containerized PaaS deploy). Never trusted blindly
+        // by default, and never a specific IP guessed/hardcoded here.
+        $trustedProxies = array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) env('TRUSTED_PROXIES', ''))
+        )));
+
+        if ($trustedProxies !== []) {
+            $middleware->trustProxies(
+                at: $trustedProxies === ['*'] ? '*' : $trustedProxies,
+                headers: Request::HEADER_X_FORWARDED_FOR
+                    | Request::HEADER_X_FORWARDED_HOST
+                    | Request::HEADER_X_FORWARDED_PORT
+                    | Request::HEADER_X_FORWARDED_PROTO,
+            );
+        }
     })
    ->withExceptions(function (Exceptions $exceptions): void {
     $exceptions->render(function (AuthenticationException $e, Request $request) {
